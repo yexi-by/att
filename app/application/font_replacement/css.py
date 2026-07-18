@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import re
-import shutil
 from pathlib import Path
 
-from app.application.file_writer import replace_text_file
 from app.rmmz.schema import FontReplacementRecord
 
 from .constants import (
@@ -15,9 +13,9 @@ from .constants import (
     CSS_URL_PATTERN,
     FONTS_DIRECTORY_NAME,
     GAMEFONT_CSS_FILE_NAME,
-    GAMEFONT_CSS_ORIGIN_FILE_NAME,
 )
 from .references import extract_font_reference_name, is_supported_font_file_name, is_target_font_reference
+
 
 def collect_gamefont_css_font_names(*, font_dir: Path, replacement_font_name: str) -> list[str]:
     """从 RPG Maker 字体样式表里收集需要同步替换的字体文件名。"""
@@ -40,41 +38,6 @@ def collect_gamefont_css_font_names(*, font_dir: Path, replacement_font_name: st
         font_names.append(reference_name)
     return font_names
 
-def replace_gamefont_css_references(
-    *,
-    font_dir: Path,
-    replacement_font_name: str,
-) -> tuple[int, list[FontReplacementRecord]]:
-    """备份并更新 RPG Maker 字体样式表中的 `@font-face` 字体文件入口。"""
-    css_path = font_dir / GAMEFONT_CSS_FILE_NAME
-    if not css_path.exists():
-        return 0, []
-    if not css_path.is_file():
-        raise FileNotFoundError(f"游戏字体样式表不是文件: {css_path}")
-
-    css_text = css_path.read_text(encoding="utf-8")
-    updated_text, records = replace_gamefont_css_text(
-        css_text=css_text,
-        replacement_font_name=replacement_font_name,
-    )
-    if not records:
-        return 0, []
-
-    backup_gamefont_css_file(css_path=css_path)
-    replace_text_file(
-        target_path=css_path,
-        content=updated_text,
-        temp_dir=font_dir,
-    )
-    return len(records), records
-
-def backup_gamefont_css_file(*, css_path: Path) -> None:
-    """首次修改字体样式表前保存原始备份。"""
-    origin_path = css_path.with_name(GAMEFONT_CSS_ORIGIN_FILE_NAME)
-    if origin_path.exists():
-        return
-    origin_path.parent.mkdir(parents=True, exist_ok=True)
-    _ = shutil.copy2(css_path, origin_path)
 
 def replace_gamefont_css_text(
     *,
@@ -124,6 +87,7 @@ def replace_gamefont_css_text(
 
     updated_css_text = CSS_FONT_FACE_BLOCK_PATTERN.sub(replace_block, css_text)
     return updated_css_text, records
+
 
 def restore_gamefont_css_text_by_origin(
     *,
@@ -191,6 +155,7 @@ def restore_gamefont_css_text_by_origin(
     updated_css_text = CSS_FONT_FACE_BLOCK_PATTERN.sub(restore_block, active_css_text)
     return updated_css_text, restored_field_count, restored_reference_count
 
+
 def collect_css_font_face_sources(css_text: str) -> dict[str, list[str]]:
     """按字体族收集样式表里的字体文件 URL。"""
     sources_by_family: dict[str, list[str]] = {}
@@ -210,11 +175,13 @@ def collect_css_font_face_sources(css_text: str) -> dict[str, list[str]]:
             sources_by_family[family_name] = sources
     return sources_by_family
 
+
 def read_origin_css_source(*, origin_sources: list[str], source_index: int) -> str:
     """按相同 URL 顺序读取原样式表字体入口。"""
     if source_index < len(origin_sources):
         return origin_sources[source_index]
     return origin_sources[0]
+
 
 def read_css_font_family(body: str) -> str:
     """读取 `@font-face` 块声明的字体族名称。"""
@@ -223,9 +190,11 @@ def read_css_font_family(body: str) -> str:
         return "unknown"
     return family_match.group("family").strip()
 
+
 def read_css_url_path(url_match: re.Match[str]) -> str:
     """读取 CSS `url(...)` 内的路径文本。"""
     return url_match.group("path").strip()
+
 
 def build_css_url_text(*, url_match: re.Match[str], url_path: str) -> str:
     """按原 URL 引号风格生成新的 CSS `url(...)` 文本。"""

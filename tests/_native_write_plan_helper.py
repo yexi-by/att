@@ -10,19 +10,10 @@ import tempfile
 from pathlib import Path
 from typing import cast
 
-from app.application.file_writer import write_planned_text_files
+from app.application.write_transaction import DurableFileWriteTransaction, PlannedFileWrite
 from app.native_quality import build_native_text_rules_payload
 from app.native_write_plan import NativePlannedFile, NativeWriteBackPlan, build_native_write_back_plan
-from app.persistence.sql import (
-    CREATE_FIELD_TRANSLATION_TERMS_TABLE,
-    CREATE_LLM_FAILURES_TABLE,
-    CREATE_MV_VIRTUAL_NAMEBOX_RULES_TABLE,
-    CREATE_PLUGIN_SOURCE_TEXT_RULES_TABLE,
-    CREATE_SOURCE_RESIDUAL_RULES_TABLE,
-    CREATE_TRANSLATION_QUALITY_ERRORS_TABLE,
-    CREATE_TRANSLATION_RUNS_TABLE,
-    CREATE_TRANSLATION_TABLE,
-)
+from app.persistence.schema_loader import load_current_schema_sql
 from app.rmmz.schema import (
     PLUGINS_FILE_NAME,
     GameData,
@@ -113,33 +104,39 @@ def write_terminology_text(
 
 def write_game_files(
     game_data: GameData,
-    game_root: Path | None = None,
     *,
     force_full_restore: bool = False,
 ) -> None:
     """测试专用磁盘替换入口。"""
-    _ = game_root
     _ensure_source_snapshot(game_data)
-    files: list[tuple[Path, str]] = []
+    writes: list[PlannedFileWrite] = []
     for file_name, value in sorted(game_data.writable_data.items()):
         if file_name == PLUGINS_FILE_NAME:
             continue
-        files.append(
-            (
-                game_data.layout.data_dir / file_name,
-                f"{json.dumps(value, ensure_ascii=False, indent=2)}\n",
+        writes.append(
+            PlannedFileWrite.from_text(
+                target_path=game_data.layout.data_dir / file_name,
+                content=f"{json.dumps(value, ensure_ascii=False, indent=2)}\n",
             )
         )
         if not force_full_restore and game_data.data.get(file_name) == value:
-            _ = files.pop()
+            _ = writes.pop()
     plugin_content = _serialize_plugins_content(game_data.writable_data.get(PLUGINS_FILE_NAME))
     if force_full_restore or plugin_content != game_data.layout.plugins_path.read_text(encoding="utf-8"):
-        files.append((game_data.layout.plugins_path, plugin_content))
+        writes.append(
+            PlannedFileWrite.from_text(
+                target_path=game_data.layout.plugins_path,
+                content=plugin_content,
+            )
+        )
     for file_name, source in sorted(game_data.writable_plugin_source_files.items()):
         target_path = game_data.layout.js_dir / "plugins" / file_name
         if force_full_restore or not target_path.is_file() or target_path.read_text(encoding="utf-8") != source:
-            files.append((target_path, source))
-    write_planned_text_files(files=files, rollback_dir_parent=game_data.layout.content_root)
+            writes.append(PlannedFileWrite.from_text(target_path=target_path, content=source))
+    _commit_test_write_transaction(
+        content_root=game_data.layout.content_root,
+        writes=writes,
+    )
 
 
 def _apply_native_write_plan(
@@ -176,28 +173,57 @@ def _apply_native_write_plan(
     finally:
         db_path.unlink(missing_ok=True)
     _apply_plan_to_memory(game_data=game_data, plan=plan)
-    write_planned_text_files(
-        files=[(file.target_path, _planned_file_content(file)) for file in plan.files],
-        rollback_dir_parent=game_data.layout.content_root,
+    _commit_test_write_transaction(
+        content_root=game_data.layout.content_root,
+        writes=[_planned_file_write(file) for file in plan.files],
     )
     return plan
+
+
+def _commit_test_write_transaction(
+    *,
+    content_root: Path,
+    writes: list[PlannedFileWrite],
+) -> None:
+    """测试也必须经当前耐崩溃文件事务应用写入计划。"""
+    if not writes:
+        return
+    transaction = DurableFileWriteTransaction.prepare(
+        mode="test_write_plan",
+        content_root=content_root,
+        writes=writes,
+    )
+    transaction.replace_targets()
+    transaction.verify_replaced_targets()
+    transaction.mark_committed_and_cleanup()
+
+
+def _planned_file_write(file: NativePlannedFile) -> PlannedFileWrite:
+    """把 native 计划收窄为文件事务输入，不复制 sidecar 内容。"""
+    if file.content is not None:
+        return PlannedFileWrite.from_text(
+            target_path=file.target_path,
+            content=file.content,
+        )
+    if file.content_path is not None:
+        return PlannedFileWrite.from_source(
+            target_path=file.target_path,
+            source_path=file.content_path,
+        )
+    raise RuntimeError("Rust 写回计划文件缺少 content 或 content_path")
 
 
 def _build_setting_payload(text_rules: TextRules | None, items: list[TranslationItem]) -> dict[str, JsonValue]:
     """构造 Rust 写回计划所需的文本规则配置。"""
     rules = text_rules or get_default_text_rules()
-    allowed_translation_paths: list[JsonValue] = [
-        path
-        for path in sorted({item.location_path for item in items})
-    ]
+    allowed_translation_paths: list[JsonValue] = [path for path in sorted({item.location_path for item in items})]
     return {
         "allowed_translation_paths": allowed_translation_paths,
         "long_text_line_width_limit": rules.setting.long_text_line_width_limit,
         "line_width_count_pattern": rules.setting.line_width_count_pattern,
         "line_split_punctuations": [punctuation for punctuation in rules.setting.line_split_punctuations],
         "preserve_wrapping_punctuation_pairs": [
-            [left, right]
-            for left, right in rules.setting.preserve_wrapping_punctuation_pairs
+            [left, right] for left, right in rules.setting.preserve_wrapping_punctuation_pairs
         ],
         "quality_text_rules": build_native_text_rules_payload(rules),
     }
@@ -222,20 +248,7 @@ def _write_temp_db(
         db_path = Path(temp_file.name)
     connection = sqlite3.connect(db_path)
     try:
-        _ = connection.executescript(
-            "\n".join(
-                [
-                    CREATE_TRANSLATION_TABLE,
-                    CREATE_TRANSLATION_RUNS_TABLE,
-                    CREATE_LLM_FAILURES_TABLE,
-                    CREATE_TRANSLATION_QUALITY_ERRORS_TABLE,
-                    CREATE_FIELD_TRANSLATION_TERMS_TABLE,
-                    CREATE_MV_VIRTUAL_NAMEBOX_RULES_TABLE,
-                    CREATE_PLUGIN_SOURCE_TEXT_RULES_TABLE,
-                    CREATE_SOURCE_RESIDUAL_RULES_TABLE,
-                ]
-            )
-        )
+        _ = connection.executescript(load_current_schema_sql())
         _ = connection.executemany(
             """
             INSERT INTO translation_items
@@ -341,13 +354,9 @@ def _insert_plugin_source_text_rules(
         return
     rows: list[tuple[str, str, str, str]] = []
     for record in records:
+        rows.extend((record.file_name, record.file_hash, selector, "translate") for selector in record.selectors)
         rows.extend(
-            (record.file_name, record.file_hash, selector, "translate")
-            for selector in record.selectors
-        )
-        rows.extend(
-            (record.file_name, record.file_hash, selector, "excluded")
-            for selector in record.excluded_selectors
+            (record.file_name, record.file_hash, selector, "excluded") for selector in record.excluded_selectors
         )
     if not rows:
         return
@@ -394,9 +403,7 @@ def _apply_plan_to_memory(
         content = _planned_file_content(file)
         if file.relative_path.startswith("data/"):
             file_name = file.relative_path.removeprefix("data/")
-            game_data.writable_data[file_name] = coerce_json_value(
-                cast(object, json.loads(content))
-            )
+            game_data.writable_data[file_name] = coerce_json_value(cast(object, json.loads(content)))
             continue
         if file.relative_path == "js/plugins.js":
             plugins_js = _parse_plugins_content(content)

@@ -8,11 +8,17 @@ from __future__ import annotations
 import argparse
 
 from app.cli.errors import CliArgumentParser
+from app.version import application_version
 
 
 def build_parser() -> argparse.ArgumentParser:
     """构建项目主命令行解析器。"""
     parser = CliArgumentParser(prog="att-mz", description="RPG Maker 翻译工具命令行入口")
+    _ = parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {application_version()}",
+    )
     _ = parser.add_argument(
         "--debug",
         action="store_true",
@@ -21,6 +27,14 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", metavar="<命令>", required=True, parser_class=CliArgumentParser)
 
     _ = subparsers.add_parser("list", help="列出当前已注册游戏")
+
+    self_check_parser = subparsers.add_parser("self-check", help="检查发行运行时、本地配置和原生扩展")
+    _ = self_check_parser.add_argument(
+        "--offline",
+        action="store_true",
+        required=True,
+        help="只执行本地检查，不访问模型或其他网络服务",
+    )
 
     doctor_parser = subparsers.add_parser("doctor", help="检查项目配置、模型连接和目标游戏状态")
     add_optional_target_arguments(doctor_parser, required=False)
@@ -33,6 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["ja", "en"],
         required=True,
         help="游戏原文语言，必须显式指定；ja 表示日文，en 表示英文",
+    )
+    _ = add_game_parser.add_argument(
+        "--additional-source-language",
+        action="append",
+        choices=["ja", "en"],
+        default=[],
+        help="显式追加另一种原文语言，可重复传入；不得与主源语言相同",
     )
 
     export_plugins_parser = subparsers.add_parser(
@@ -48,7 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_optional_target_arguments(import_plugin_parser)
     _ = import_plugin_parser.add_argument("--input", required=True, help="外部插件规则 JSON 文件")
-    _ = import_plugin_parser.add_argument("--confirm-empty", action="store_true", help="确认当前扫描没有插件规则候选，允许导入空规则")
+    _ = import_plugin_parser.add_argument(
+        "--confirm-empty", action="store_true", help="确认当前扫描没有插件规则候选，允许导入空规则"
+    )
 
     export_event_commands_parser = subparsers.add_parser(
         "export-event-commands-json",
@@ -65,6 +88,15 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="CODE",
         help="需要导出的事件指令编码数组；传入后覆盖配置文件默认编码数组",
     )
+    _ = export_event_commands_parser.add_argument(
+        "--event-command-default-code",
+        action="extend",
+        nargs="+",
+        type=int,
+        dest="event_command_default_codes",
+        metavar="CODE",
+        help="本命令使用的默认事件编码；优先于引擎和通用配置",
+    )
 
     import_event_command_parser = subparsers.add_parser(
         "import-event-command-rules",
@@ -72,7 +104,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_optional_target_arguments(import_event_command_parser)
     _ = import_event_command_parser.add_argument("--input", required=True, help="外部事件指令规则 JSON 文件")
-    _ = import_event_command_parser.add_argument("--confirm-empty", action="store_true", help="确认当前扫描没有事件指令规则候选，允许导入空规则")
+    _ = import_event_command_parser.add_argument(
+        "--confirm-empty", action="store_true", help="确认当前扫描没有事件指令规则候选，允许导入空规则"
+    )
     _ = import_event_command_parser.add_argument(
         "--code",
         action="extend",
@@ -81,6 +115,15 @@ def build_parser() -> argparse.ArgumentParser:
         dest="codes",
         metavar="CODE",
         help="导入空事件指令规则时对应的事件指令编码数组；传入后覆盖配置文件默认编码数组",
+    )
+    _ = import_event_command_parser.add_argument(
+        "--event-command-default-code",
+        action="extend",
+        nargs="+",
+        type=int,
+        dest="event_command_default_codes",
+        metavar="CODE",
+        help="未传 --code 时使用的事件编码；优先于引擎和通用配置",
     )
 
     export_note_tag_parser = subparsers.add_parser(
@@ -103,7 +146,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_optional_target_arguments(import_note_tag_parser)
     _ = import_note_tag_parser.add_argument("--input", required=True, help="Note 标签规则 JSON 文件")
-    _ = import_note_tag_parser.add_argument("--confirm-empty", action="store_true", help="确认当前扫描没有 Note 标签规则候选，允许导入空规则")
+    _ = import_note_tag_parser.add_argument(
+        "--confirm-empty", action="store_true", help="确认当前扫描没有 Note 标签规则候选，允许导入空规则"
+    )
 
     scan_placeholder_parser = subparsers.add_parser(
         "scan-placeholder-candidates",
@@ -331,7 +376,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_optional_target_arguments(import_mv_namebox_parser)
     _ = import_mv_namebox_parser.add_argument("--input", required=True, help="MV 虚拟名字框规则 JSON 文件")
-    _ = import_mv_namebox_parser.add_argument("--confirm-empty", action="store_true", help="确认当前 MV 游戏不需要虚拟名字框规则，允许导入空规则")
+    _ = import_mv_namebox_parser.add_argument(
+        "--confirm-empty", action="store_true", help="确认当前 MV 游戏不需要虚拟名字框规则，允许导入空规则"
+    )
 
     translate_parser = subparsers.add_parser("translate", help="翻译指定游戏的正文")
     add_optional_target_arguments(translate_parser)
@@ -373,6 +420,12 @@ def build_parser() -> argparse.ArgumentParser:
         include_translation=False,
         include_text_rules=False,
     )
+
+    recover_write_transaction_parser = subparsers.add_parser(
+        "recover-write-transaction",
+        help="恢复或收尾当前游戏未完成的文件写事务",
+    )
+    add_optional_target_arguments(recover_write_transaction_parser)
 
     export_terminology_parser = subparsers.add_parser(
         "export-terminology",
@@ -435,7 +488,9 @@ def build_parser() -> argparse.ArgumentParser:
     import_placeholder_source_group = import_placeholder_parser.add_mutually_exclusive_group(required=True)
     _ = import_placeholder_source_group.add_argument("--rules", help="占位符规则 JSON 字符串")
     _ = import_placeholder_source_group.add_argument("--input", help="占位符规则 JSON 文件")
-    _ = import_placeholder_parser.add_argument("--confirm-empty", action="store_true", help="确认当前扫描没有普通占位符候选，允许导入空规则")
+    _ = import_placeholder_parser.add_argument(
+        "--confirm-empty", action="store_true", help="确认当前扫描没有普通占位符候选，允许导入空规则"
+    )
 
     validate_structured_placeholder_parser = subparsers.add_parser(
         "validate-structured-placeholder-rules",
@@ -465,7 +520,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_optional_target_arguments(import_structured_placeholder_parser)
     _ = import_structured_placeholder_parser.add_argument("--input", required=True, help="结构化占位符规则 JSON 文件")
-    _ = import_structured_placeholder_parser.add_argument("--confirm-empty", action="store_true", help="确认当前扫描没有结构化占位符候选，允许导入空规则")
+    _ = import_structured_placeholder_parser.add_argument(
+        "--confirm-empty", action="store_true", help="确认当前扫描没有结构化占位符候选，允许导入空规则"
+    )
 
     validate_plugin_parser = subparsers.add_parser(
         "validate-plugin-rules",
@@ -499,6 +556,15 @@ def build_parser() -> argparse.ArgumentParser:
         dest="codes",
         metavar="CODE",
         help="需要导出的事件指令编码数组；传入后覆盖配置文件默认编码数组",
+    )
+    _ = prepare_workspace_parser.add_argument(
+        "--event-command-default-code",
+        action="extend",
+        nargs="+",
+        type=int,
+        dest="event_command_default_codes",
+        metavar="CODE",
+        help="未传 --code 时使用的事件编码；优先于引擎和通用配置",
     )
 
     validate_workspace_parser = subparsers.add_parser(

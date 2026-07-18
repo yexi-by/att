@@ -1,6 +1,11 @@
 """术语表记录会话能力。"""
 
-from app.terminology.schemas import TERMINOLOGY_CATEGORIES, TerminologyCategory, TerminologyGlossary, TerminologyRegistry
+from app.terminology.schemas import (
+    TERMINOLOGY_CATEGORIES,
+    TerminologyCategory,
+    TerminologyGlossary,
+    TerminologyRegistry,
+)
 
 from .rows import row_str
 from .session_base import SessionMixinBase
@@ -10,8 +15,8 @@ from .sql import (
     DELETE_ALL_TEXT_GLOSSARY_TERMS,
     INSERT_FIELD_TRANSLATION_TERM,
     INSERT_TEXT_GLOSSARY_TERM,
-    SELECT_TERMINOLOGY_BUNDLE_STATE,
     SELECT_FIELD_TRANSLATION_TERMS,
+    SELECT_TERMINOLOGY_BUNDLE_STATE,
     SELECT_TEXT_GLOSSARY_TERMS,
     TERMINOLOGY_BUNDLE_STATE_KEY,
     UPSERT_TERMINOLOGY_BUNDLE_STATE,
@@ -61,10 +66,7 @@ class TerminologyRecordSessionMixin(SessionMixinBase):
                 return None
             return TerminologyRegistry()
 
-        category_map: dict[TerminologyCategory, dict[str, str]] = {
-            category: {}
-            for category in TERMINOLOGY_CATEGORIES
-        }
+        category_map: dict[TerminologyCategory, dict[str, str]] = {category: {} for category in TERMINOLOGY_CATEGORIES}
         for row in rows:
             category = parse_terminology_category(row_str(row, "category", self.db_path), self.db_path)
             source_text = row_str(row, "source_text", self.db_path)

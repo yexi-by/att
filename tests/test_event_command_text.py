@@ -289,9 +289,7 @@ async def test_event_command_nested_write_error_reports_location_path(
         game_data=game_data,
         import_file=import_file,
     )
-    item = EventCommandTextExtraction(game_data, records).extract_all_text()[
-        "CommonEvents.json"
-    ].translation_items[0]
+    item = EventCommandTextExtraction(game_data, records).extract_all_text()["CommonEvents.json"].translation_items[0]
     item.location_path = "CommonEvents.json/1/4/parameters/3/missing"
     item.translation_lines = ["事件指令译文"]
 
@@ -349,9 +347,7 @@ async def test_event_command_json_string_leaf_uses_visible_text_protocol(
         game_data=game_data,
         import_file=import_file,
     )
-    item = EventCommandTextExtraction(game_data, records).extract_all_text()[
-        "CommonEvents.json"
-    ].translation_items[0]
+    item = EventCommandTextExtraction(game_data, records).extract_all_text()["CommonEvents.json"].translation_items[0]
     assert item.original_lines == [source_message.strip()]
 
     translated_message = "\n　" + r"\C[2]任务说明\C[0]\n前往村子。" + "　\n"

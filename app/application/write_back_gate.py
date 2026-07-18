@@ -12,7 +12,7 @@ from app.native_quality import collect_native_quality_counts, count_native_write
 from app.persistence import TargetGameSession
 from app.rmmz.schema import GameData, TranslationItem
 from app.rmmz.text_rules import TextRules
-from app.text_scope import TextScopeResult, TextScopeService
+from app.text_scope import TextScopeResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +31,7 @@ async def assert_write_back_quality_passed(
     text_rules: TextRules,
     translated_items: list[TranslationItem],
     require_complete_translation: bool,
-    scope: TextScopeResult | None = None,
+    scope: TextScopeResult,
     include_native_checks: bool = True,
 ) -> None:
     """质量检查未通过时直接中断写入游戏文件。"""
@@ -58,29 +58,17 @@ async def collect_write_back_quality_errors(
     text_rules: TextRules,
     translated_items: list[TranslationItem],
     require_complete_translation: bool,
-    scope: TextScopeResult | None = None,
+    scope: TextScopeResult,
     include_native_checks: bool = True,
 ) -> list[WriteBackQualityIssue]:
     """收集当前已保存译文是否允许写入游戏文件的质量错误。"""
-    if scope is None:
-        scope = await TextScopeService().build(
-            session=session,
-            game_data=game_data,
-            text_rules=text_rules,
-            translated_items=translated_items,
-            include_write_probe=True,
-        )
     errors: list[WriteBackQualityIssue] = []
     translated_paths = {item.location_path for item in translated_items}
     active_paths = scope.active_paths
     writable_paths = scope.writable_paths
     pending_paths = writable_paths - translated_paths
     stale_paths = translated_paths - writable_paths
-    active_translated_items = [
-        item
-        for item in translated_items
-        if item.location_path in active_paths
-    ]
+    active_translated_items = [item for item in translated_items if item.location_path in active_paths]
 
     if require_complete_translation and pending_paths:
         errors.append(
@@ -100,11 +88,7 @@ async def collect_write_back_quality_errors(
     latest_run = await session.read_latest_translation_run()
     if latest_run is not None:
         quality_errors = await session.read_translation_quality_errors(latest_run.run_id)
-        active_quality_errors = [
-            item
-            for item in quality_errors
-            if item.location_path in pending_paths
-        ]
+        active_quality_errors = [item for item in quality_errors if item.location_path in pending_paths]
         llm_failures = await session.read_llm_failures(latest_run.run_id)
         if require_complete_translation and active_quality_errors:
             errors.append(

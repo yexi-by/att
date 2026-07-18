@@ -8,15 +8,12 @@ from typing import cast
 
 from pydantic import TypeAdapter
 
-from app.rmmz.schema import GameData, PluginSourceTextRuleRecord
-from app.rmmz.text_rules import JsonValue, TextRules, coerce_json_value
+from app.rmmz.schema import PluginSourceTextRuleRecord
+from app.rmmz.text_rules import JsonValue, coerce_json_value
 
 from .models import PluginSourceRuleImportEntry, PluginSourceRuleImportFile, PluginSourceScan
-from .scanner import build_plugin_source_file_hash, build_plugin_source_scan
 
-RULE_IMPORT_ADAPTER: TypeAdapter[list[PluginSourceRuleImportEntry]] = TypeAdapter(
-    list[PluginSourceRuleImportEntry]
-)
+RULE_IMPORT_ADAPTER: TypeAdapter[list[PluginSourceRuleImportEntry]] = TypeAdapter(list[PluginSourceRuleImportEntry])
 
 
 def parse_plugin_source_rule_import_text(text: str) -> PluginSourceRuleImportFile:
@@ -31,20 +28,15 @@ def parse_plugin_source_rule_import_text(text: str) -> PluginSourceRuleImportFil
 
 def build_plugin_source_rule_records_from_import(
     *,
-    game_data: GameData,
     import_file: PluginSourceRuleImportFile,
-    text_rules: TextRules,
-    scan: PluginSourceScan | None = None,
+    scan: PluginSourceScan,
 ) -> list[PluginSourceTextRuleRecord]:
     """按当前游戏源码校验外部插件源码规则并转换为数据库记录。"""
     if not import_file.rules:
         return []
-    if scan is None:
-        scan = build_plugin_source_scan(game_data=game_data, text_rules=text_rules)
     file_scans = {file_scan.file_name: file_scan for file_scan in scan.files}
     selectors_by_file = {
-        file_scan.file_name: {candidate.selector for candidate in file_scan.candidates}
-        for file_scan in scan.files
+        file_scan.file_name: {candidate.selector for candidate in file_scan.candidates} for file_scan in scan.files
     }
     file_names = [entry.file for entry in import_file.rules]
     duplicate_files = sorted(file_name for file_name, count in Counter(file_names).items() if count > 1)
@@ -81,7 +73,7 @@ def build_plugin_source_rule_records_from_import(
         records.append(
             PluginSourceTextRuleRecord(
                 file_name=file_name,
-                file_hash=build_plugin_source_file_hash(game_data.plugin_source_files[file_name]),
+                file_hash=file_scan.file_hash,
                 selectors=selectors,
                 excluded_selectors=excluded_selectors,
             )
@@ -125,14 +117,14 @@ def _validate_selectors(
     cleaned_selectors = [selector.strip() for selector in selectors if selector.strip()]
     if not cleaned_selectors and not allow_empty:
         raise ValueError(f"插件源码规则缺少 selector: {file_name}")
-    duplicate_selectors = sorted(
-        selector for selector, count in Counter(cleaned_selectors).items() if count > 1
-    )
+    duplicate_selectors = sorted(selector for selector, count in Counter(cleaned_selectors).items() if count > 1)
     if duplicate_selectors:
         raise ValueError(f"插件源码 {selector_label} 重复: {file_name}: {'、'.join(duplicate_selectors)}")
     missing_selectors = sorted(selector for selector in cleaned_selectors if selector not in available_selectors)
     if missing_selectors:
-        raise ValueError(f"插件源码 {selector_label} 未命中当前 AST 地图: {file_name}: {'、'.join(missing_selectors[:5])}")
+        raise ValueError(
+            f"插件源码 {selector_label} 未命中当前 AST 地图: {file_name}: {'、'.join(missing_selectors[:5])}"
+        )
     return cleaned_selectors
 
 

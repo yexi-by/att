@@ -1,3 +1,5 @@
+<!-- 此文件由 scripts/generate_skill_protocol.py 生成；请修改 skills/att-mz-protocol 后重新生成。 -->
+
 # RPG Maker MV/MZ 游戏翻译常识参考
 
 本文件是 A.T.T MZ Skill 的按需参考资料。只有在判断 RPG Maker MV/MZ 引擎协议、控制符、事件指令、数据库字段、插件参数或 Note 标签时才读取；不要把全文塞进模型提示词、子代理任务单或面向用户的交付报告。

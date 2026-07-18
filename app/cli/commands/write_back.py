@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 
+from app.application.summaries import WriteBackSummary
 from app.cli.arguments import read_bool_arg, read_optional_str_arg
 from app.cli.progress import build_progress_reporter
 from app.cli.reports import (
@@ -14,17 +15,16 @@ from app.cli.reports import (
     build_run_all_summary_report,
     build_terminology_write_summary_report,
     build_write_back_summary_report,
+    build_write_transaction_recovery_summary_report,
 )
 from app.cli.runtime import (
     HandlerSession,
     build_setting_overrides,
     build_translation_run_limits,
-    ensure_text_translation_success,
     resolve_target_game_title,
     translate_text_for_handler,
     write_back_for_handler,
 )
-from app.application.summaries import WriteBackSummary
 from app.observability import logger
 
 
@@ -75,6 +75,16 @@ async def run_restore_font_command(args: argparse.Namespace) -> int:
     return 0
 
 
+async def run_recover_write_transaction_command(args: argparse.Namespace) -> int:
+    """执行 `recover-write-transaction` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    async with HandlerSession() as handler:
+        summary = await handler.recover_write_transaction(game_title=game_title)
+    report = build_write_transaction_recovery_summary_report(summary)
+    print(report.to_json_text())
+    return 0
+
+
 async def run_write_terminology_command(args: argparse.Namespace) -> int:
     """执行 `write-terminology` 命令。"""
     game_title = await resolve_target_game_title(args)
@@ -108,10 +118,12 @@ async def run_all_command(args: argparse.Namespace) -> int:
             placeholder_rules_text=placeholder_rules_text,
             run_limits=build_translation_run_limits(args),
         )
-        ensure_text_translation_success(text_summary)
-
         write_back_summary: WriteBackSummary | None = None
-        if skip_write_back:
+        if not text_summary.is_clean_completion:
+            logger.warning(
+                f"[tag.warning]正文翻译没有干净完成，已跳过回写[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]"
+            )
+        elif skip_write_back:
             logger.warning(f"[tag.warning]已按参数跳过回写[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]")
         else:
             write_back_summary = await write_back_for_handler(
@@ -126,4 +138,4 @@ async def run_all_command(args: argparse.Namespace) -> int:
         write_back_summary=write_back_summary,
     )
     print(report.to_json_text())
-    return 0
+    return text_summary.exit_code

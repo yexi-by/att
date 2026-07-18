@@ -8,10 +8,10 @@ from __future__ import annotations
 import argparse
 
 from app.agent_toolkit import AgentToolkitService
-from app.cli.arguments import read_int_set_arg, read_required_path_arg
+from app.cli.arguments import read_int_set_arg, read_optional_int_list_arg, read_required_path_arg
 from app.cli.progress import build_progress_reporter
-from app.cli.runtime import resolve_target_game_title
 from app.cli.reports import build_sampled_stdout_report, write_report_outputs
+from app.cli.runtime import resolve_target_game_title
 
 
 async def run_prepare_agent_workspace_command(args: argparse.Namespace) -> int:
@@ -24,6 +24,10 @@ async def run_prepare_agent_workspace_command(args: argparse.Namespace) -> int:
         game_title=game_title,
         output_dir=output_dir,
         command_codes=command_codes,
+        default_command_codes_override=read_optional_int_list_arg(
+            args,
+            "event_command_default_codes",
+        ),
     )
     write_report_outputs(report=report, args=args, title="Agent 工作区准备报告")
     return 1 if report.status == "error" else 0

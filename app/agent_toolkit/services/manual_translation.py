@@ -2,6 +2,8 @@
 # pyright: reportPrivateUsage=false
 # mixin 通过 AgentToolkitService 组合成同一个服务边界，允许调用同门面的受保护核心方法。
 
+from app.application.mutation_guard import open_game_for_mutation
+
 from .common import (
     AgentIssue,
     AgentReport,
@@ -11,10 +13,10 @@ from .common import (
     Path,
     QualityProgressCallbacks,
     TextRules,
-    TextScopeService,
     TranslationItem,
     _build_manual_translation_template_entry,
     _build_translation_line_break_count_detail,
+    _noop_quality_progress_callbacks,
     _prepare_manual_translation_item,
     _text_scope_blocking_errors,
     aiofiles,
@@ -26,7 +28,6 @@ from .common import (
     issue,
     json,
     load_setting,
-    _noop_quality_progress_callbacks,
 )
 
 
@@ -47,7 +48,11 @@ class ManualTranslationAgentMixin:
         set_progress(0, 5)
         set_status("加载游戏数据和规则")
         async with await self.game_registry.open_game(game_title) as session:
-            setting = load_setting(self.setting_path, source_language=session.source_language)
+            setting = load_setting(
+                self.setting_path,
+                source_language=session.source_language,
+                additional_source_languages=session.additional_source_languages,
+            )
             custom_rules = await self._resolve_custom_rules(
                 session=session,
                 custom_placeholder_rules_text=None,
@@ -62,13 +67,14 @@ class ManualTranslationAgentMixin:
             translated_items = await session.read_translated_items()
             advance_progress(1)
             set_status("构建当前文本范围")
-            scope = await TextScopeService().build(
+            analysis_context = await self._build_game_analysis_context(
                 session=session,
                 game_data=game_data,
                 text_rules=text_rules,
                 translated_items=translated_items,
                 include_write_probe=include_write_probe,
             )
+            scope = analysis_context.scope
             translated_paths = {item.location_path for item in translated_items}
             advance_progress(1)
         blocking_errors = _text_scope_blocking_errors(scope)
@@ -127,7 +133,9 @@ class ManualTranslationAgentMixin:
             details={},
         )
 
-    async def import_manual_translations(self: AgentServiceContext, *, game_title: str, input_path: Path) -> AgentReport:
+    async def import_manual_translations(
+        self: AgentServiceContext, *, game_title: str, input_path: Path
+    ) -> AgentReport:
         """导入 Agent 手动填写的译文，并按项目规则校验后保存。"""
         try:
             async with aiofiles.open(input_path, "r", encoding="utf-8-sig") as file:
@@ -144,8 +152,12 @@ class ManualTranslationAgentMixin:
         errors: list[AgentIssue] = []
         invalid_items: JsonArray = []
         valid_items: list[TranslationItem] = []
-        async with await self.game_registry.open_game(game_title) as session:
-            setting = load_setting(self.setting_path, source_language=session.source_language)
+        async with await open_game_for_mutation(self.game_registry, game_title) as session:
+            setting = load_setting(
+                self.setting_path,
+                source_language=session.source_language,
+                additional_source_languages=session.additional_source_languages,
+            )
             custom_rules = await self._resolve_custom_rules(
                 session=session,
                 custom_placeholder_rules_text=None,
@@ -158,12 +170,13 @@ class ManualTranslationAgentMixin:
             )
             game_data = await self._load_translation_source_game_data(session)
             translated_items = await session.read_translated_items()
-            scope = await TextScopeService().build(
+            analysis_context = await self._build_game_analysis_context(
                 session=session,
                 game_data=game_data,
                 text_rules=text_rules,
                 translated_items=translated_items,
             )
+            scope = analysis_context.scope
             blocking_errors = _text_scope_blocking_errors(scope)
             if blocking_errors:
                 return AgentReport.from_parts(

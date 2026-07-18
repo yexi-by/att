@@ -14,4 +14,3 @@ class ChatMessage(BaseModel):
 
     role: Literal["system", "user", "assistant"]
     text: str
-

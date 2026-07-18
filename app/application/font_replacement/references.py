@@ -11,6 +11,7 @@ from app.rmmz.text_rules import JsonObject, JsonValue, coerce_json_value
 
 from .constants import BARE_FONT_REFERENCE_PATTERN, FONT_FILE_REFERENCE_PATTERN, FONT_FILE_SUFFIXES
 
+
 def build_font_reference_tokens(old_font_names: list[str]) -> list[str]:
     """生成字体文件名和不带扩展名的字体引用候选。"""
     token_set: set[str] = set()
@@ -20,6 +21,7 @@ def build_font_reference_tokens(old_font_names: list[str]) -> list[str]:
         if font_stem:
             token_set.add(font_stem)
     return sorted(token_set, key=len, reverse=True)
+
 
 def replace_font_names_in_json_value(
     *,
@@ -63,6 +65,7 @@ def replace_font_names_in_json_value(
 
     return value, 0
 
+
 def replace_font_names_in_text(
     *,
     text: str,
@@ -85,6 +88,7 @@ def replace_font_names_in_text(
         replacement_font_name=replacement_font_name,
     )
 
+
 def replace_complete_font_reference_text(
     *,
     text: str,
@@ -96,8 +100,8 @@ def replace_complete_font_reference_text(
     if not stripped_text:
         return text, 0
 
-    leading_text = text[:len(text) - len(text.lstrip())]
-    trailing_text = text[len(text.rstrip()):]
+    leading_text = text[: len(text) - len(text.lstrip())]
+    trailing_text = text[len(text.rstrip()) :]
     for old_font_name in old_font_names:
         replaced_reference = replace_complete_font_reference_core(
             text=stripped_text,
@@ -107,6 +111,7 @@ def replace_complete_font_reference_text(
         if replaced_reference is not None:
             return f"{leading_text}{replaced_reference}{trailing_text}", 1
     return text, 0
+
 
 def replace_complete_font_reference_core(
     *,
@@ -121,10 +126,11 @@ def replace_complete_font_reference_core(
     separator_index = max(text.rfind("/"), text.rfind("\\"))
     if separator_index < 0:
         return None
-    reference_name = text[separator_index + 1:]
+    reference_name = text[separator_index + 1 :]
     if reference_name != old_font_name:
         return None
-    return f"{text[:separator_index + 1]}{replacement_font_name}"
+    return f"{text[: separator_index + 1]}{replacement_font_name}"
+
 
 def replace_font_references_in_encoded_json_text(
     *,
@@ -136,7 +142,7 @@ def replace_font_references_in_encoded_json_text(
     try:
         raw_value = cast(object, json.loads(text))
         json_value = coerce_json_value(raw_value)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         return text, 0
 
     if not isinstance(json_value, list | dict):
@@ -151,6 +157,7 @@ def replace_font_references_in_encoded_json_text(
         return text, 0
     return json.dumps(replaced_value, ensure_ascii=False), replaced_count
 
+
 def collect_replacement_font_names(
     *,
     replacement_font_path: str | None,
@@ -162,6 +169,7 @@ def collect_replacement_font_names(
         font_names.append(Path(replacement_font_path).name)
     font_names.extend(record.replacement_font_name for record in records)
     return normalize_font_name_list(font_names)
+
 
 def restore_font_references_in_json_value_by_origin(
     *,
@@ -216,6 +224,7 @@ def restore_font_references_in_json_value_by_origin(
 
     return active_value, 0, 0
 
+
 def restore_font_references_in_text_by_origin(
     *,
     active_text: str,
@@ -236,6 +245,7 @@ def restore_font_references_in_text_by_origin(
         target_font_names=target_font_names,
     )
 
+
 def restore_complete_font_reference_text(
     *,
     active_text: str,
@@ -250,8 +260,8 @@ def restore_complete_font_reference_text(
     if origin_font_reference is None:
         return active_text, 0
 
-    leading_text = active_text[:len(active_text) - len(active_text.lstrip())]
-    trailing_text = active_text[len(active_text.rstrip()):]
+    leading_text = active_text[: len(active_text) - len(active_text.lstrip())]
+    trailing_text = active_text[len(active_text.rstrip()) :]
     for target_font_name in target_font_names:
         if not is_complete_reference_to_font(
             text=stripped_active_text,
@@ -260,6 +270,7 @@ def restore_complete_font_reference_text(
             continue
         return f"{leading_text}{origin_font_reference}{trailing_text}", 1
     return active_text, 0
+
 
 def restore_font_references_in_encoded_json_text(
     *,
@@ -273,7 +284,7 @@ def restore_font_references_in_encoded_json_text(
         origin_raw_value = cast(object, json.loads(origin_text))
         active_value = coerce_json_value(active_raw_value)
         origin_value = coerce_json_value(origin_raw_value)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         return active_text, 0
 
     if not isinstance(active_value, list | dict) or not isinstance(origin_value, list | dict):
@@ -288,6 +299,7 @@ def restore_font_references_in_encoded_json_text(
         return active_text, 0
     return json.dumps(restored_value, ensure_ascii=False), reference_count
 
+
 def collect_origin_font_reference(text: str) -> str | None:
     """从原文本字段中读取完整旧字体引用。"""
     stripped_text = text.strip()
@@ -299,6 +311,7 @@ def collect_origin_font_reference(text: str) -> str | None:
         return stripped_text
     return None
 
+
 def is_complete_reference_to_font(*, text: str, font_name: str) -> bool:
     """判断当前字符串是否完整指向指定字体名。"""
     if text == font_name:
@@ -306,26 +319,31 @@ def is_complete_reference_to_font(*, text: str, font_name: str) -> bool:
     reference_name = extract_font_reference_name(text)
     return reference_name == font_name
 
+
 def is_complete_font_file_reference(text: str) -> bool:
     """判断字符串是否是完整字体文件引用。"""
     reference_name = extract_font_reference_name(text)
     return FONT_FILE_REFERENCE_PATTERN.fullmatch(reference_name) is not None
+
 
 def is_complete_bare_font_reference(text: str) -> bool:
     """判断字符串是否是完整无扩展名字体引用。"""
     reference_name = extract_font_reference_name(text)
     return BARE_FONT_REFERENCE_PATTERN.fullmatch(reference_name) is not None
 
+
 def extract_font_reference_name(text: str) -> str:
     """取出带目录字体引用末尾的字体名。"""
     separator_index = max(text.rfind("/"), text.rfind("\\"))
     if separator_index < 0:
         return text
-    return text[separator_index + 1:]
+    return text[separator_index + 1 :]
+
 
 def is_supported_font_file_name(file_name: str) -> bool:
     """判断路径末尾是否是项目支持替换的字体文件。"""
     return Path(file_name).suffix.lower() in FONT_FILE_SUFFIXES
+
 
 def is_target_font_reference(*, text: str, target_font_names: list[str]) -> bool:
     """判断 CSS URL 是否指向候选覆盖字体。"""
@@ -333,6 +351,7 @@ def is_target_font_reference(*, text: str, target_font_names: list[str]) -> bool
         if is_complete_reference_to_font(text=text, font_name=target_font_name):
             return True
     return False
+
 
 def normalize_font_name_list(font_names: list[str]) -> list[str]:
     """清理字体名列表并保持稳定去重顺序。"""

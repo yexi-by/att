@@ -21,7 +21,6 @@ from app.cli.runtime import (
     HandlerSession,
     build_setting_overrides,
     build_translation_run_limits,
-    ensure_text_translation_not_blocked,
     resolve_target_game_title,
     translate_text_for_handler,
 )
@@ -206,7 +205,6 @@ async def run_translate_command(args: argparse.Namespace) -> int:
             placeholder_rules_text=placeholder_rules_text,
             run_limits=build_translation_run_limits(args),
         )
-    ensure_text_translation_not_blocked(summary)
     report = build_translate_summary_report(summary)
     print(report.to_json_text())
-    return 0
+    return summary.exit_code

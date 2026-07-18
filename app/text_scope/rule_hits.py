@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from app.event_command_text.importer import command_matches_filters
-from app.note_tag_text.parser import iter_note_tag_matches
-from app.note_tag_text.sources import collect_note_tag_sources, note_file_pattern_matches
-from app.plugin_text.common import expand_rule_to_leaf_paths, jsonpath_to_location_path, resolve_plugin_leaves
-from app.plugin_text.paths import jsonpath_to_event_command_location_path, resolve_event_command_leaves
-from app.rmmz.commands import iter_all_commands
-from app.rmmz.schema import EventCommandTextRuleRecord, GameData, NoteTagTextRuleRecord, PluginTextRuleRecord
+from app.event_command_text.index import EventCommandAnalysisEntry
+from app.note_tag_text.sources import NoteTagSource, note_file_pattern_matches
+from app.plugin_text.common import expand_rule_to_leaf_paths, jsonpath_to_location_path
+from app.plugin_text.index import PluginParameterAnalysisEntry
+from app.plugin_text.paths import jsonpath_to_event_command_location_path
+from app.rmmz.schema import EventCommandTextRuleRecord, NoteTagTextRuleRecord, PluginTextRuleRecord
 from app.rmmz.text_protocol import normalize_visible_text_for_extraction
 from app.rmmz.text_rules import TextRules
 
@@ -17,17 +17,18 @@ from .models import TextScopeRuleHit
 
 def collect_plugin_rule_hits(
     *,
-    game_data: GameData,
+    plugin_index: tuple[PluginParameterAnalysisEntry, ...],
     plugin_rules: list[PluginTextRuleRecord],
 ) -> list[TextScopeRuleHit]:
     """展开插件参数规则命中的全部字符串叶子。"""
     hits: list[TextScopeRuleHit] = []
     seen_paths: set[str] = set()
+    entries_by_index = {entry.plugin_index: entry for entry in plugin_index}
     for rule in plugin_rules:
-        if rule.plugin_index >= len(game_data.plugins_js):
+        entry = entries_by_index.get(rule.plugin_index)
+        if entry is None:
             continue
-        plugin = game_data.plugins_js[rule.plugin_index]
-        resolved_leaves = resolve_plugin_leaves(plugin)
+        resolved_leaves = entry.resolved_leaves
         string_leaf_map = {
             leaf.path: leaf.value
             for leaf in resolved_leaves
@@ -62,13 +63,15 @@ def collect_plugin_rule_hits(
 
 def collect_event_command_rule_hits(
     *,
-    game_data: GameData,
+    command_index: tuple[EventCommandAnalysisEntry, ...],
     event_rules: list[EventCommandTextRuleRecord],
 ) -> list[TextScopeRuleHit]:
     """展开事件指令规则命中的全部字符串叶子。"""
     hits: list[TextScopeRuleHit] = []
     seen_paths: set[str] = set()
-    for path, _display_name, command in iter_all_commands(game_data):
+    for entry in command_index:
+        path = entry.location_path
+        command = entry.command
         matched_rules = [
             rule
             for rule in event_rules
@@ -81,7 +84,7 @@ def collect_event_command_rule_hits(
         if not matched_rules:
             continue
         command_location_path = "/".join(map(str, path))
-        resolved_leaves = resolve_event_command_leaves(command.parameters)
+        resolved_leaves = entry.resolved_leaves
         string_leaf_map = {
             leaf.path: leaf.value
             for leaf in resolved_leaves
@@ -117,21 +120,20 @@ def collect_event_command_rule_hits(
 
 def collect_note_tag_rule_hits(
     *,
-    game_data: GameData,
+    note_sources: tuple[NoteTagSource, ...],
     note_tag_rules: list[NoteTagTextRuleRecord],
     text_rules: TextRules,
 ) -> list[TextScopeRuleHit]:
     """展开 Note 标签规则命中的全部字符串值。"""
     hits: list[TextScopeRuleHit] = []
     seen_paths: set[str] = set()
-    all_sources = collect_note_tag_sources(game_data=game_data)
     for rule in note_tag_rules:
         tag_names = set(rule.tag_names)
-        for source in all_sources:
+        for source in note_sources:
             if not note_file_pattern_matches(file_name=source.file_name, file_pattern=rule.file_name):
                 continue
-            for match in iter_note_tag_matches(source.note_text):
-                if match.tag_name not in tag_names or match.value_span is None:
+            for match in source.matches:
+                if match.tag_name not in tag_names or not match.has_value:
                     continue
                 location_path = f"{source.location_prefix}/note/{match.tag_name}"
                 if location_path in seen_paths:

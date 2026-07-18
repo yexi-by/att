@@ -13,15 +13,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.rmmz.game_data import BaseItem, CommonEvent, MapData, System, Troop
 from app.rmmz.control_codes import (
     LITERAL_LINE_BREAK_PLACEHOLDER,
     REAL_LINE_BREAK_MARKER,
     REAL_LINE_BREAK_PLACEHOLDER,
 )
 from app.rmmz.engine import EngineKind
+from app.rmmz.game_data import BaseItem, CommonEvent, MapData, System, Troop
 from app.rmmz.text_rules import ControlSequenceSpan, JsonValue, TextRules, get_default_text_rules
-
 
 type ItemType = Literal["long_text", "array", "short_text"]
 type ErrorType = Literal["模型返回不可解析", "AI漏翻", "文本结构不匹配", "控制符不匹配", "源文残留", "选项行数不匹配"]
@@ -113,15 +112,10 @@ class TranslationItem(BaseModel):
             if (
                 existing_original is not None
                 and existing_original != original
-                and (
-                    existing_source in {"custom", "structured"}
-                    or span.source in {"custom", "structured"}
-                )
+                and (existing_source in {"custom", "structured"} or span.source in {"custom", "structured"})
             ):
                 detail = f"{existing_original} / {original}"
-                raise ValueError(
-                    f"自定义占位符 {placeholder} 同时匹配了多个不同片段: {detail}"
-                )
+                raise ValueError(f"自定义占位符 {placeholder} 同时匹配了多个不同片段: {detail}")
 
             if existing_original is None:
                 self.placeholder_map[placeholder] = original
@@ -140,9 +134,7 @@ class TranslationItem(BaseModel):
                 self.placeholder_map[REAL_LINE_BREAK_PLACEHOLDER] = REAL_LINE_BREAK_MARKER
                 placeholder_sources[REAL_LINE_BREAK_PLACEHOLDER] = "standard"
             elif existing_original != REAL_LINE_BREAK_MARKER:
-                raise ValueError(
-                    f"占位符 {REAL_LINE_BREAK_PLACEHOLDER} 同时匹配了多个不同片段"
-                )
+                raise ValueError(f"占位符 {REAL_LINE_BREAK_PLACEHOLDER} 同时匹配了多个不同片段")
             self.placeholder_counts[REAL_LINE_BREAK_PLACEHOLDER] = (
                 self.placeholder_counts.get(REAL_LINE_BREAK_PLACEHOLDER, 0) + real_break_count
             )
@@ -153,21 +145,14 @@ class TranslationItem(BaseModel):
             masked_line = rules.replace_rm_control_sequences(line, replace_func)
             return replace_real_line_breaks(masked_line)
 
-        self.original_lines_with_placeholders = [
-            replace_line(line)
-            for line in self.original_lines
-        ]
+        self.original_lines_with_placeholders = [replace_line(line) for line in self.original_lines]
 
     def verify_placeholders(self, text_rules: TextRules | None = None) -> None:
         """校验模型返回的占位符数量是否与原文一致。"""
         rules = text_rules or get_default_text_rules()
         errors: list[str] = []
-        original_placeholders = rules.collect_placeholder_tokens(
-            self.original_lines_with_placeholders
-        )
-        translated_placeholders = rules.collect_placeholder_tokens(
-            self.translation_lines_with_placeholders
-        )
+        original_placeholders = rules.collect_placeholder_tokens(self.original_lines_with_placeholders)
+        translated_placeholders = rules.collect_placeholder_tokens(self.translation_lines_with_placeholders)
 
         extra_placeholders = translated_placeholders - original_placeholders
         if extra_placeholders:
@@ -188,14 +173,10 @@ class TranslationItem(BaseModel):
                         )
                     continue
                 if actual_count != expected_count:
-                    errors.append(
-                        f"占位符 {placeholder} 数量错误 (期望: {expected_count}, 实际: {actual_count})"
-                    )
+                    errors.append(f"占位符 {placeholder} 数量错误 (期望: {expected_count}, 实际: {actual_count})")
 
         original_raw_controls = rules.collect_unprotected_control_sequences(self.original_lines)
-        translated_raw_controls = rules.collect_unprotected_control_sequences(
-            self.translation_lines_with_placeholders
-        )
+        translated_raw_controls = rules.collect_unprotected_control_sequences(self.translation_lines_with_placeholders)
         if original_raw_controls != translated_raw_controls:
             control_error = (
                 "疑似控制符不一致，未被占位符规则覆盖的反斜杠控制片段必须原样保留 "
@@ -315,6 +296,8 @@ class TranslationRunRecord(BaseModel):
     success_count: int = 0
     quality_error_count: int = 0
     llm_failure_count: int = 0
+    physical_request_count: int = Field(default=0, ge=0)
+    retry_request_count: int = Field(default=0, ge=0)
     started_at: str
     updated_at: str
     finished_at: str | None = None

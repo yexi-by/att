@@ -1,20 +1,17 @@
 """JSON 参数树展开与受限 JSONPath 工具。"""
 
 import re
+from collections.abc import Sequence
 from typing import Literal
 
 from pydantic import BaseModel
 
-from app.rmmz.text_rules import JsonObject, JsonValue
 from app.rmmz.text_protocol import decode_json_container_text
+from app.rmmz.text_rules import JsonObject, JsonValue
 
 JSON_INDEX_SEGMENT_PATTERN: re.Pattern[str] = re.compile(r"\[\d+\]")
-JSON_PATH_PATTERN: re.Pattern[str] = re.compile(
-    r"^\$(?:\['(?:[^'\\]|\\.)+'\]|\[(?:\d+|\*)\])+$"
-)
-JSON_PATH_SEGMENT_PATTERN: re.Pattern[str] = re.compile(
-    r"\['((?:[^'\\]|\\.)+)'\]|\[(\d+|\*)\]"
-)
+JSON_PATH_PATTERN: re.Pattern[str] = re.compile(r"^\$(?:\['(?:[^'\\]|\\.)+'\]|\[(?:\d+|\*)\])+$")
+JSON_PATH_SEGMENT_PATTERN: re.Pattern[str] = re.compile(r"\['((?:[^'\\]|\\.)+)'\]|\[(\d+|\*)\]")
 
 
 class ResolvedLeaf(BaseModel):
@@ -153,7 +150,7 @@ def quote_jsonpath_key(key: str) -> str:
     return f"'{escaped_key}'"
 
 
-def build_allowed_templates(resolved_leaves: list[ResolvedLeaf]) -> set[str]:
+def build_allowed_templates(resolved_leaves: Sequence[ResolvedLeaf]) -> set[str]:
     """根据字符串叶子路径构造允许的模板路径集合。"""
     allowed_templates: set[str] = set()
     for leaf in resolved_leaves:
@@ -180,14 +177,13 @@ def build_allowed_templates(resolved_leaves: list[ResolvedLeaf]) -> set[str]:
 def expand_rule_to_leaf_paths(
     *,
     path_template: str,
-    resolved_leaves: list[ResolvedLeaf],
+    resolved_leaves: Sequence[ResolvedLeaf],
 ) -> list[str]:
     """把模板路径展开为命中的精确叶子路径列表。"""
     matched_paths = [
         leaf.path
         for leaf in resolved_leaves
-        if leaf.value_type == "string"
-        and jsonpath_matches_template(template_path=path_template, actual_path=leaf.path)
+        if leaf.value_type == "string" and jsonpath_matches_template(template_path=path_template, actual_path=leaf.path)
     ]
     matched_paths.sort()
     return matched_paths
@@ -196,7 +192,7 @@ def expand_rule_to_leaf_paths(
 def build_json_string_leaf_path_hint(
     *,
     path_template: str,
-    resolved_leaves: list[ResolvedLeaf],
+    resolved_leaves: Sequence[ResolvedLeaf],
 ) -> str | None:
     """为误指向 JSON 字符串容器的规则生成内部叶子路径提示。"""
     descendant_leaves = [
@@ -309,6 +305,22 @@ def collect_plugin_json_string_leaf_candidates(
     plugin: dict[str, JsonValue],
 ) -> list[JsonObject]:
     """列出插件参数 JSON 字符串容器内的字符串叶子候选。"""
+    return collect_plugin_json_string_leaf_candidates_from_resolved_leaves(
+        plugin_index=plugin_index,
+        plugin_name=plugin_name,
+        plugin=plugin,
+        resolved_leaves=resolve_plugin_leaves(plugin),
+    )
+
+
+def collect_plugin_json_string_leaf_candidates_from_resolved_leaves(
+    *,
+    plugin_index: int,
+    plugin_name: str,
+    plugin: dict[str, JsonValue],
+    resolved_leaves: Sequence[ResolvedLeaf],
+) -> list[JsonObject]:
+    """基于已经展开的插件参数叶索引生成 JSON 容器候选。"""
     parameters = plugin.get("parameters")
     if not isinstance(parameters, dict):
         return []
@@ -317,21 +329,20 @@ def collect_plugin_json_string_leaf_candidates(
     for parameter_name, raw_value in parameters.items():
         if not isinstance(raw_value, str):
             continue
-        container = try_parse_container_string(raw_value)
-        if container is None:
-            continue
         container_path = f"$['parameters'][{quote_jsonpath_key(parameter_name)}]"
         leaves = [
             leaf
-            for leaf in resolve_json_leaves(value=container, root_path=container_path)
+            for leaf in resolved_leaves
             if leaf.value_type == "string"
+            and leaf.from_json_string
+            and jsonpath_template_is_ancestor(
+                template_path=container_path,
+                actual_path=leaf.path,
+            )
         ]
         if not leaves:
             continue
-        path_candidates: list[JsonValue] = [
-            candidate
-            for candidate in sorted(build_allowed_templates(leaves))
-        ]
+        path_candidates: list[JsonValue] = [candidate for candidate in sorted(build_allowed_templates(leaves))]
         samples: list[JsonValue] = [
             {
                 "path": leaf.path,
@@ -358,6 +369,7 @@ __all__: list[str] = [
     "build_allowed_templates",
     "build_json_string_leaf_path_hint",
     "collect_plugin_json_string_leaf_candidates",
+    "collect_plugin_json_string_leaf_candidates_from_resolved_leaves",
     "expand_rule_to_leaf_paths",
     "jsonpath_matches_template",
     "jsonpath_template_is_ancestor",

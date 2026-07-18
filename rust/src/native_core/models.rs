@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct QualityPayload {
     pub(crate) items: Vec<NativeTranslationItem>,
     pub(crate) text_rules: NativeTextRules,
@@ -16,11 +17,13 @@ pub(crate) struct QualityPayload {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProtocolPayload {
     pub(crate) entries: Vec<ProtocolEntry>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NoteSourcesPayload {
     pub(crate) data: HashMap<String, Value>,
     pub(crate) file_pattern: Option<String>,
@@ -32,33 +35,18 @@ pub(crate) struct NoteTagSourceOutput {
     pub(crate) owner_path: Vec<String>,
     pub(crate) note_text: String,
     pub(crate) location_prefix: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct FontReplacementPayload {
-    pub(crate) data: HashMap<String, Value>,
-    pub(crate) plugins: Vec<Value>,
-    pub(crate) old_font_names: Vec<String>,
-    pub(crate) replacement_font_name: String,
+    pub(crate) matches: Vec<NoteTagMatchOutput>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct FontReplacementOutput {
-    pub(crate) data_changes: Vec<FontReplacementChange>,
-    pub(crate) plugin_changes: Vec<FontReplacementChange>,
-    pub(crate) replaced_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct FontReplacementChange {
-    pub(crate) file_name: String,
-    pub(crate) value_path: String,
-    pub(crate) original_text: String,
-    pub(crate) replaced_text: String,
-    pub(crate) count: usize,
+pub(crate) struct NoteTagMatchOutput {
+    pub(crate) tag_name: String,
+    pub(crate) value: String,
+    pub(crate) has_value: bool,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProtocolEntry {
     pub(crate) item: NativeTranslationItem,
     pub(crate) mode: String,
@@ -69,6 +57,7 @@ pub(crate) struct ProtocolEntry {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NativeTranslationItem {
     pub(crate) location_path: String,
     pub(crate) item_type: String,
@@ -78,6 +67,7 @@ pub(crate) struct NativeTranslationItem {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NativeTextRules {
     pub(crate) custom_placeholder_rules: Vec<NativeCustomPlaceholderRule>,
     #[serde(default)]
@@ -94,12 +84,14 @@ pub(crate) struct NativeTextRules {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NativeCustomPlaceholderRule {
     pub(crate) pattern_text: String,
     pub(crate) placeholder_template: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NativeStructuredPlaceholderRule {
     pub(crate) rule_name: String,
     pub(crate) rule_type: String,
@@ -109,6 +101,7 @@ pub(crate) struct NativeStructuredPlaceholderRule {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct NativeSourceResidualRule {
     pub(crate) rule_id: String,
     pub(crate) rule_type: String,
@@ -153,6 +146,7 @@ pub(crate) struct CompiledRules {
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledCustomRule {
     pub(crate) pattern: FancyRegex,
+    pub(crate) pattern_text: String,
     pub(crate) placeholder_template: String,
 }
 
@@ -189,3 +183,6 @@ pub(crate) struct PlaceholderBuild {
     pub(crate) placeholder_map: HashMap<String, String>,
     pub(crate) placeholder_counts: HashMap<String, usize>,
 }
+
+#[cfg(test)]
+mod strict_payload_tests;

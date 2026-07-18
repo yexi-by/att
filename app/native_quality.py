@@ -6,45 +6,19 @@ Rust 多线程扫描结果恢复成项目现有质量报告明细结构。
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from importlib import import_module
-from typing import Protocol, cast
 
-from app.rmmz.schema import COMMON_EVENTS_FILE_NAME, MAP_PATTERN, PLUGINS_FILE_NAME, TROOPS_FILE_NAME, SourceResidualRuleRecord, TranslationItem
-from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules, coerce_json_value, ensure_json_array, ensure_json_object
-
-
-class NativeModule(Protocol):
-    """PyO3 扩展暴露给 Python 的最小接口。"""
-
-    def collect_note_tag_sources(self, payload_json: str) -> str:
-        """运行 Rust 多线程 Note 标签来源扫描。"""
-        raise NotImplementedError
-
-    def scan_font_replacements(self, payload_json: str) -> str:
-        """运行 Rust 多线程字体引用替换扫描。"""
-        raise NotImplementedError
-
-    def scan_quality(self, payload_json: str) -> str:
-        """运行 Rust 多线程质检。"""
-        raise NotImplementedError
-
-    def scan_quality_counts(self, payload_json: str) -> str:
-        """运行 Rust 多线程质检并只返回计数。"""
-        raise NotImplementedError
-
-    def scan_write_protocol(self, payload_json: str) -> str:
-        """运行 Rust 多线程写入协议预演。"""
-        raise NotImplementedError
-
-    def scan_write_protocol_count(self, payload_json: str) -> str:
-        """运行 Rust 多线程写入协议预演并只返回计数。"""
-        raise NotImplementedError
-
-    def native_thread_count(self) -> int:
-        """返回 Rust 当前使用的线程数。"""
-        raise NotImplementedError
+from app.native_runtime import invoke_native
+from app.native_runtime import native_thread_count as runtime_native_thread_count
+from app.rmmz.schema import (
+    COMMON_EVENTS_FILE_NAME,
+    MAP_PATTERN,
+    PLUGINS_FILE_NAME,
+    TROOPS_FILE_NAME,
+    SourceResidualRuleRecord,
+    TranslationItem,
+)
+from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules, ensure_json_array, ensure_json_object
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,16 +48,13 @@ def collect_native_quality_details(
     source_residual_rules: list[SourceResidualRuleRecord],
 ) -> NativeQualityDetails:
     """调用 Rust 多线程核心收集正文质量问题。"""
-    native_module = _load_native_module()
     payload = _build_quality_payload(
         items=items,
         text_rules=text_rules,
         source_residual_rules=source_residual_rules,
     )
-    result_text = native_module.scan_quality(json.dumps(payload, ensure_ascii=False))
     result = ensure_json_object(
-        # json.loads 的返回值来自动态 JSON 边界，立即交给 coerce_json_value 收窄。
-        coerce_json_value(cast(object, json.loads(result_text))),
+        invoke_native("quality.scan", payload),
         "native_quality_result",
     )
     return NativeQualityDetails(
@@ -113,15 +84,13 @@ def collect_native_quality_counts(
     source_residual_rules: list[SourceResidualRuleRecord],
 ) -> NativeQualityCounts:
     """调用 Rust 多线程核心收集正文质量问题计数。"""
-    native_module = _load_native_module()
     payload = _build_quality_payload(
         items=items,
         text_rules=text_rules,
         source_residual_rules=source_residual_rules,
     )
-    result_text = native_module.scan_quality_counts(json.dumps(payload, ensure_ascii=False))
     result = ensure_json_object(
-        coerce_json_value(cast(object, json.loads(result_text))),
+        invoke_native("quality.counts", payload),
         "native_quality_count_result",
     )
     return NativeQualityCounts(
@@ -150,9 +119,7 @@ def collect_native_quality_counts(
 
 def native_thread_count() -> int:
     """读取 Rust 质检核心当前会使用的线程数。"""
-    native_module = _load_native_module()
-    count = native_module.native_thread_count()
-    return count
+    return runtime_native_thread_count()
 
 
 def collect_native_write_protocol_details(
@@ -162,12 +129,9 @@ def collect_native_write_protocol_details(
     items: list[TranslationItem],
 ) -> JsonArray:
     """调用 Rust 多线程核心检查写入协议风险。"""
-    native_module = _load_native_module()
-    payload = {"entries": _build_protocol_entries(game_data=game_data, plugins_js=plugins_js, items=items)}
-    result_text = native_module.scan_write_protocol(json.dumps(payload, ensure_ascii=False))
+    payload: JsonObject = {"entries": _build_protocol_entries(game_data=game_data, plugins_js=plugins_js, items=items)}
     return ensure_json_array(
-        # json.loads 的返回值来自动态 JSON 边界，立即交给 coerce_json_value 收窄。
-        coerce_json_value(cast(object, json.loads(result_text))),
+        invoke_native("write_protocol.scan", payload),
         "native_write_protocol_result",
     )
 
@@ -179,11 +143,9 @@ def count_native_write_protocol_issues(
     items: list[TranslationItem],
 ) -> int:
     """调用 Rust 多线程核心检查写入协议风险并只返回数量。"""
-    native_module = _load_native_module()
-    payload = {"entries": _build_protocol_entries(game_data=game_data, plugins_js=plugins_js, items=items)}
-    result_text = native_module.scan_write_protocol_count(json.dumps(payload, ensure_ascii=False))
+    payload: JsonObject = {"entries": _build_protocol_entries(game_data=game_data, plugins_js=plugins_js, items=items)}
     result = ensure_json_object(
-        coerce_json_value(cast(object, json.loads(result_text))),
+        invoke_native("write_protocol.counts", payload),
         "native_write_protocol_count_result",
     )
     return _read_non_negative_int(
@@ -199,49 +161,14 @@ def collect_native_note_tag_sources(
     file_pattern: str | None,
 ) -> JsonArray:
     """调用 Rust 核心扫描所有可用 Note 标签来源。"""
-    native_module = _load_native_module()
     payload: JsonObject = {
         "data": game_data,
         "file_pattern": file_pattern,
     }
-    result_text = native_module.collect_note_tag_sources(json.dumps(payload, ensure_ascii=False))
     return ensure_json_array(
-        # json.loads 的返回值来自动态 JSON 边界，立即交给 coerce_json_value 收窄。
-        coerce_json_value(cast(object, json.loads(result_text))),
+        invoke_native("note_sources.collect", payload),
         "native_note_tag_sources",
     )
-
-
-def collect_native_font_replacements(
-    *,
-    game_data: JsonObject,
-    plugins_js: JsonArray,
-    old_font_names: list[str],
-    replacement_font_name: str,
-) -> JsonObject:
-    """调用 Rust 核心扫描本轮字体引用替换清单。"""
-    native_module = _load_native_module()
-    payload: JsonObject = {
-        "data": game_data,
-        "plugins": plugins_js,
-        "old_font_names": [name for name in old_font_names],
-        "replacement_font_name": replacement_font_name,
-    }
-    result_text = native_module.scan_font_replacements(json.dumps(payload, ensure_ascii=False))
-    return ensure_json_object(
-        # json.loads 的返回值来自动态 JSON 边界，立即交给 coerce_json_value 收窄。
-        coerce_json_value(cast(object, json.loads(result_text))),
-        "native_font_replacements",
-    )
-
-
-def _load_native_module() -> NativeModule:
-    """加载 PyO3 扩展，缺失时给出可执行的修复提示。"""
-    try:
-        native_module = import_module("app._native")
-    except ImportError as error:
-        raise RuntimeError("Rust 原生扩展不可用，请先执行 uv run maturin develop") from error
-    return cast(NativeModule, cast(object, native_module))
 
 
 def _build_quality_payload(
@@ -329,7 +256,9 @@ def _build_plugin_protocol_entry(*, plugins_js: JsonArray, item: TranslationItem
 def _build_event_parameter_protocol_entry(*, game_data: JsonObject, item: TranslationItem) -> JsonObject:
     """构造事件指令参数写入协议检查条目。"""
     parts = item.location_path.split("/")
-    command, value_parts = _locate_event_command_for_protocol(game_data=game_data, parts=parts, context=item.location_path)
+    command, value_parts = _locate_event_command_for_protocol(
+        game_data=game_data, parts=parts, context=item.location_path
+    )
     if len(value_parts) < 2 or value_parts[0] != "parameters":
         raise ValueError(f"事件指令路径缺少 parameters 段: {item.location_path}")
     parameters = ensure_json_array(command["parameters"], f"{item.location_path}.parameters")
@@ -457,7 +386,6 @@ def build_native_text_rules_payload(text_rules: TextRules) -> JsonObject:
 __all__ = [
     "NativeQualityDetails",
     "NativeQualityCounts",
-    "collect_native_font_replacements",
     "collect_native_note_tag_sources",
     "collect_native_quality_counts",
     "collect_native_quality_details",

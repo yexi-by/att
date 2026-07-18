@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "variants": {
+    "att-mz": {
+      "global_replacements": [],
+      "file_replacements": {}
+    },
+    "att-mz-release": {
+      "global_replacements": [
+        {
+          "old": "<项目目录>",
+          "new": "<发行版目录>"
+        },
+        {
+          "old": "uv run python main.py",
+          "new": ".\\att-mz.exe"
+        }
+      ],
+      "file_replacements": {
+        "SKILL.md": [
+          {
+            "old": "name: att-mz\n",
+            "new": "name: att-mz-release\n"
+          },
+          {
+            "old": "description: 仅在用户明确要求执行或继续 A.T.T MZ 的 RPG Maker MV/MZ 游戏翻译流程时使用，包括注册游戏、准备工作区、分析术语和文本规则、导入规则、调用模型翻译、检查译文、手动修复、写进游戏文件与试玩反馈补漏。",
+            "new": "description: 仅在用户明确要求使用 A.T.T MZ 发行版执行或继续 RPG Maker MV/MZ 游戏翻译流程时使用，包括注册游戏、准备工作区、分析术语和文本规则、导入规则、调用模型翻译、检查译文、手动修复、写进游戏文件与试玩反馈补漏。"
+          },
+          {
+            "old": "# A.T.T MZ Skill",
+            "new": "# A.T.T MZ 发行版 Skill"
+          },
+          {
+            "old": "- `<发行版目录>` 是 A.T.T MZ 源码仓库。开发版默认命令是 `.\\att-mz.exe <命令> ...`。",
+            "new": "- `<发行版目录>` 是 A.T.T MZ 发行包目录。发行版默认命令是 `.\\att-mz.exe <命令> ...`。\n- 不要运行 `uv run python main.py`，不要安装 Python、Rust、uv 或 maturin，不要读取项目源码。"
+          },
+          {
+            "old": "不能散落到项目目录或游戏根目录",
+            "new": "不能散落到发行版目录或游戏根目录"
+          },
+          {
+            "old": "| 启动与注册 | 确认项目、游戏、工作区、源语言和模型配置可用 |",
+            "new": "| 启动与注册 | 确认发行版、游戏、工作区、源语言和模型配置可用 |"
+          },
+          {
+            "old": "| 工具排障 | 处理合法输入反复失败或 Skill/CLI 契约冲突 | 合法工作区文件、CLI 错误输出、源码仓库 | 工具问题结论或源码修复任务 | 排障后回到公开 CLI 流程重新校验 | 用源码绕过业务校验、直接改数据库或游戏写回结果 |",
+            "new": "| 工具排障 | 识别合法输入反复失败或 Skill/CLI 契约冲突 | 合法工作区文件、CLI 错误输出 | 需要源码级排障的结论 | 已确认发行版流程无法继续 | 尝试读取源码、直接改数据库或绕过 CLI |"
+          },
+          {
+            "old": "- 正常翻译任务保持黑盒，不靠源码、数据库表结构或 Python 对象猜外部规则格式。\n- 工具排障只处理翻译流程内的合法输入反复失败或 Skill/CLI 契约冲突。普通源码开发、代码审查、测试修复、重构和发布维护按项目开发规范处理，不作为本 Skill 的触发条件。\n- 工具排障可以阅读源码、测试和命令注册逻辑；排障后继续翻译时，必须回到公开 CLI 和工作区 JSON 流程重新校验。",
+            "new": "- 发行版翻译任务保持黑盒，不靠源码、数据库表结构或 Python 对象猜外部规则格式。\n- 工具排障只识别发行版翻译流程内的合法输入反复失败或 Skill/CLI 契约冲突。\n- 需要阅读或修改 A.T.T MZ 项目源码时，必须切换到源码仓库和开发版 Skill。\n- 发行版同一合法工作区文件反复触发无法解释的 CLI 错误时，停止翻译流程并报告需要源码级排障；不要在发行版目录内尝试修工具。"
+          },
+          {
+            "old": "- 在 `<发行版目录>` 写翻译临时脚本、中间 JSON、抽样报告或手动译文表。",
+            "new": "- 在 `<发行版目录>` 写翻译临时脚本、中间 JSON、抽样报告或手动译文表。\n- 运行 `uv run python main.py`、安装开发依赖或读取源码。"
+          }
+        ],
+        "references/cli-command-contract.md": [
+          {
+            "old": "本文件记录开发版 Skill 使用的命令入口、阶段用途、成功判断和失败处理。命令必须在 `<发行版目录>` 执行，默认前缀是：",
+            "new": "本文件记录发行版 Skill 使用的命令入口、阶段用途、成功判断和失败处理。命令必须在 `<发行版目录>` 执行，默认前缀是："
+          },
+          {
+            "old": "- 写 JSON 时保持中日英原文可读性；Python 使用 `json.dumps(..., ensure_ascii=False)` 并显式 `encoding=\"utf-8\"`。",
+            "new": "- 写 JSON 时保持中日英原文可读性；Python 使用 `json.dumps(..., ensure_ascii=False)` 并显式 `encoding=\"utf-8\"`。发行版流程不得要求用户安装 Python、Node.js 或其他开发运行时；只在当前环境已经具备且用户允许时，才用临时脚本辅助处理工作区文件。"
+          }
+        ],
+        "references/subtask-package-mode.md": [
+          {
+            "old": "主代理完成以下命令后，才能询问用户是否使用外部协作任务包：\n\n```powershell\n.\\att-mz.exe prepare-agent-workspace --game <游戏标题> --output-dir <工作区>\n```\n\n发行版使用：\n\n",
+            "new": "主代理完成以下发行版命令后，才能询问用户是否使用外部协作任务包：\n\n"
+          }
+        ]
+      }
+    }
+  }
+}

@@ -49,6 +49,7 @@ class LLMHandler:
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
+            max_retries=0,
         )
         self.request_body_extra = normalized_request_body_extra
 
@@ -107,17 +108,11 @@ def format_chat_messages(messages: list[ChatMessage]) -> list[ChatCompletionMess
     request_messages: list[ChatCompletionMessageParam] = []
     for message in messages:
         if message.role == "system":
-            request_messages.append(
-                ChatCompletionSystemMessageParam(role="system", content=message.text)
-            )
+            request_messages.append(ChatCompletionSystemMessageParam(role="system", content=message.text))
         elif message.role == "user":
-            request_messages.append(
-                ChatCompletionUserMessageParam(role="user", content=message.text)
-            )
+            request_messages.append(ChatCompletionUserMessageParam(role="user", content=message.text))
         else:
-            request_messages.append(
-                ChatCompletionAssistantMessageParam(role="assistant", content=message.text)
-            )
+            request_messages.append(ChatCompletionAssistantMessageParam(role="assistant", content=message.text))
     return request_messages
 
 

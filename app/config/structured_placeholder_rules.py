@@ -9,7 +9,6 @@ from typing import cast
 from app.rmmz.control_codes import StructuredPlaceholderRule
 from app.rmmz.json_types import JsonObject, coerce_json_value, ensure_json_array, ensure_json_object
 
-
 STRUCTURED_PLACEHOLDER_RULES_FILE_NAME = "structured-placeholder-rules.json"
 
 

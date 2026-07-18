@@ -1,3 +1,5 @@
+<!-- 此文件由 scripts/generate_skill_protocol.py 生成；请修改 skills/att-mz-protocol 后重新生成。 -->
+
 # 普通占位符规则
 
 普通占位符规则用于保护必须原样保留的游戏协议片段。它把精确正则命中的不可翻译内容替换成 `[CUSTOM_...]` 标记，让模型只看到应翻译的玩家可见文本。
@@ -72,4 +74,3 @@ uv run python main.py import-placeholder-rules --game <游戏标题> --input <�
 `original_lines`、`text_for_model_lines` 和待填 `translation_lines` 中凡是出现反斜杠开头的 RPG Maker 控制片段、内置游戏控制符占位符或自定义占位符，都必须当成不可翻译标记。
 
 填写 `translation_lines` 时只能使用 `original_lines` 里的游戏原始控制符，禁止复制程序占位符。看起来不标准的控制片段也必须按原文保留，例如原文是 `\F3[66」「` 时，译文也保留 `\F3[66」「`，不能改括号、编号或紧邻边界。
-

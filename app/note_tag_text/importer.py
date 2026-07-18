@@ -7,11 +7,15 @@ from typing import cast
 import aiofiles
 from pydantic import TypeAdapter
 
-from app.note_tag_text.parser import iter_note_tag_matches
-from app.note_tag_text.sources import collect_note_tag_sources, matched_note_file_names
+from app.note_tag_text.sources import (
+    NoteTagSource,
+    collect_note_tag_sources,
+    matched_note_file_names,
+    note_file_pattern_matches,
+)
 from app.rmmz.schema import GameData, NoteTagTextRuleRecord
-from app.rmmz.text_rules import TextRules, coerce_json_value, get_default_text_rules
 from app.rmmz.text_protocol import normalize_visible_text_for_extraction
+from app.rmmz.text_rules import TextRules, coerce_json_value, get_default_text_rules
 
 type NoteTagRuleImportFile = dict[str, list[str]]
 _NOTE_TAG_RULE_IMPORT_ADAPTER: TypeAdapter[NoteTagRuleImportFile] = TypeAdapter(NoteTagRuleImportFile)
@@ -58,9 +62,13 @@ def build_note_tag_rule_records_from_import(
     game_data: GameData,
     import_file: NoteTagRuleImportFile,
     text_rules: TextRules | None = None,
+    note_sources: tuple[NoteTagSource, ...] | None = None,
 ) -> list[NoteTagTextRuleRecord]:
     """把外部 Note 标签映射转换成数据库规则记录。"""
     rules = text_rules if text_rules is not None else get_default_text_rules()
+    resolved_note_sources = (
+        tuple(collect_note_tag_sources(game_data=game_data)) if note_sources is None else note_sources
+    )
     records: list[NoteTagTextRuleRecord] = []
     for file_name, tag_names in import_file.items():
         normalized_file_name = file_name.strip()
@@ -75,7 +83,7 @@ def build_note_tag_rule_records_from_import(
             raise ValueError(f"Note 标签规则不能为空: {normalized_file_name}")
         for tag_name in normalized_tag_names:
             _validate_note_tag_rule_hit(
-                game_data=game_data,
+                note_sources=resolved_note_sources,
                 file_name=normalized_file_name,
                 tag_name=tag_name,
                 text_rules=rules,
@@ -108,7 +116,7 @@ def normalize_tag_names(tag_names: list[str]) -> list[str]:
 
 def _validate_note_tag_rule_hit(
     *,
-    game_data: GameData,
+    note_sources: tuple[NoteTagSource, ...],
     file_name: str,
     tag_name: str,
     text_rules: TextRules,
@@ -116,12 +124,10 @@ def _validate_note_tag_rule_hit(
     """校验单个 Note 标签规则至少命中一条可翻译值。"""
     hit_count = 0
     translatable_hit_count = 0
-    for source in collect_note_tag_sources(game_data=game_data, file_pattern=file_name):
-        matches = [
-            match
-            for match in iter_note_tag_matches(source.note_text)
-            if match.tag_name == tag_name and match.value_span is not None
-        ]
+    for source in note_sources:
+        if not note_file_pattern_matches(file_name=source.file_name, file_pattern=file_name):
+            continue
+        matches = [match for match in source.matches if match.tag_name == tag_name and match.has_value]
         if len(matches) > 1:
             raise ValueError(f"{source.location_prefix}/note/{tag_name} 标签重复，无法生成唯一定位路径")
         if not matches:

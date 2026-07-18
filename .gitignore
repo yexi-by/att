@@ -29,8 +29,11 @@ app/_native*.pdb
 logs/
 scripts/*
 !scripts/build_release.py
-!scripts/benchmark_active_runtime_audit.py
-!scripts/benchmark_rebuild_active_runtime.py
+!scripts/generate_skill_protocol.py
+!scripts/release_safety_selftest.py
+!scripts/run_release_verification.ps1
+!scripts/smoke_release_windows.ps1
+!scripts/verify_release_handoff.ps1
 
 
 

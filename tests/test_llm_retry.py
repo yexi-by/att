@@ -1,5 +1,6 @@
 """LLM 错误分类与业务层重试测试。"""
 
+import asyncio
 from pathlib import Path
 from typing import cast, override
 
@@ -16,7 +17,11 @@ from app.llm import (
 )
 from app.llm_request_body_extra import LLMRequestBodyExtra
 from app.observability import setup_logger
-from app.translation.retry import request_with_recoverable_retry
+from app.translation.rate_limit import RpmRateLimiter
+from app.translation.retry import (
+    TranslationRequestStopped,
+    request_with_recoverable_retry_result,
+)
 
 
 class FakeLLMHandler(LLMHandler):
@@ -44,6 +49,36 @@ class FakeLLMHandler(LLMHandler):
         if self.failures:
             raise self.failures.pop(0)
         return "成功"
+
+
+class CountingRateLimiter:
+    """记录每个物理请求取得许可的假限制器。"""
+
+    def __init__(self) -> None:
+        """初始化许可计数。"""
+        self.acquire_count: int = 0
+
+    async def acquire(self) -> None:
+        """记录一次许可获取。"""
+        self.acquire_count += 1
+
+
+class BlockingRateLimiter:
+    """用于验证软停止可以中断许可等待。"""
+
+    def __init__(self) -> None:
+        """初始化进入与取消信号。"""
+        self.entered: asyncio.Event = asyncio.Event()
+        self.cancelled: asyncio.Event = asyncio.Event()
+
+    async def acquire(self) -> None:
+        """保持等待，直到调用方取消许可请求。"""
+        self.entered.set()
+        try:
+            _ = await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
 
 
 class FakeCompletionMessage:
@@ -122,11 +157,33 @@ async def test_recoverable_llm_error_retries_in_translation_layer(tmp_path: Path
     """可恢复错误由翻译层按业务策略重试。"""
     setup_logger(use_console=False, file_path=tmp_path / "retry.log", enqueue_file_log=False)
     request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
-    handler = FakeLLMHandler(
-        failures=[APIConnectionError(message="连接失败", request=request)]
+    handler = FakeLLMHandler(failures=[APIConnectionError(message="连接失败", request=request)])
+    rate_limiter = CountingRateLimiter()
+
+    result = await request_with_recoverable_retry_result(
+        llm_handler=handler,
+        model="fake-model",
+        messages=[ChatMessage(role="user", text="你好")],
+        retry_count=1,
+        retry_delay=0,
+        task_label="测试任务",
+        rate_limiter=rate_limiter,
     )
 
-    result = await request_with_recoverable_retry(
+    assert result.text == "成功"
+    assert result.attempt_count == 2
+    assert handler.call_count == 2
+    assert rate_limiter.acquire_count == 2
+
+
+@pytest.mark.asyncio
+async def test_success_result_reports_physical_request_count(tmp_path: Path) -> None:
+    """成功结果包含首次请求和附加重试的实际请求总数。"""
+    setup_logger(use_console=False, file_path=tmp_path / "attempts.log", enqueue_file_log=False)
+    request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+    handler = FakeLLMHandler(failures=[APIConnectionError(message="连接失败", request=request)])
+
+    result = await request_with_recoverable_retry_result(
         llm_handler=handler,
         model="fake-model",
         messages=[ChatMessage(role="user", text="你好")],
@@ -135,8 +192,8 @@ async def test_recoverable_llm_error_retries_in_translation_layer(tmp_path: Path
         task_label="测试任务",
     )
 
-    assert result == "成功"
-    assert handler.call_count == 2
+    assert result.text == "成功"
+    assert result.attempt_count == 2
 
 
 @pytest.mark.asyncio
@@ -145,7 +202,7 @@ async def test_empty_llm_response_retries_in_translation_layer(tmp_path: Path) -
     setup_logger(use_console=False, file_path=tmp_path / "empty-response.log", enqueue_file_log=False)
     handler = FakeLLMHandler(failures=[EmptyLLMResponseError("空响应")])
 
-    result = await request_with_recoverable_retry(
+    result = await request_with_recoverable_retry_result(
         llm_handler=handler,
         model="fake-model",
         messages=[ChatMessage(role="user", text="你好")],
@@ -154,7 +211,8 @@ async def test_empty_llm_response_retries_in_translation_layer(tmp_path: Path) -
         task_label="测试任务",
     )
 
-    assert result == "成功"
+    assert result.text == "成功"
+    assert result.attempt_count == 2
     assert handler.call_count == 2
 
 
@@ -170,7 +228,7 @@ async def test_empty_llm_response_exhaustion_records_retryable_failure(tmp_path:
     )
 
     with pytest.raises(LLMRequestFailure) as caught_error:
-        _ = await request_with_recoverable_retry(
+        _ = await request_with_recoverable_retry_result(
             llm_handler=handler,
             model="fake-model",
             messages=[ChatMessage(role="user", text="你好")],
@@ -199,9 +257,52 @@ async def test_unrecoverable_llm_error_stops_without_retry(tmp_path: Path) -> No
             )
         ]
     )
+    rate_limiter = CountingRateLimiter()
 
     with pytest.raises(LLMRequestFailure) as caught_error:
-        _ = await request_with_recoverable_retry(
+        _ = await request_with_recoverable_retry_result(
+            llm_handler=handler,
+            model="fake-model",
+            messages=[ChatMessage(role="user", text="你好")],
+            retry_count=3,
+            retry_delay=0,
+            task_label="测试任务",
+            rate_limiter=rate_limiter,
+        )
+
+    assert handler.call_count == 1
+    assert caught_error.value.info.retryable is False
+    assert caught_error.value.info.category == "fatal"
+    assert caught_error.value.attempt_count == 1
+    assert rate_limiter.acquire_count == 1
+
+
+@pytest.mark.asyncio
+async def test_llm_request_cancellation_is_not_wrapped(tmp_path: Path) -> None:
+    """取消正在等待的模型请求时原样传播 CancelledError。"""
+    setup_logger(use_console=False, file_path=tmp_path / "cancelled.log", enqueue_file_log=False)
+    request_started = asyncio.Event()
+
+    class BlockingLLMHandler(FakeLLMHandler):
+        @override
+        async def get_ai_response(
+            self,
+            *,
+            messages: list[ChatMessage],
+            model: str,
+            temperature: float | None = None,
+        ) -> str:
+            _ = messages
+            _ = model
+            _ = temperature
+            self.call_count: int = self.call_count + 1
+            _ = request_started.set()
+            _ = await asyncio.Event().wait()
+            raise AssertionError("取消后不应继续执行")
+
+    handler = BlockingLLMHandler(failures=[])
+    task = asyncio.create_task(
+        request_with_recoverable_retry_result(
             llm_handler=handler,
             model="fake-model",
             messages=[ChatMessage(role="user", text="你好")],
@@ -209,11 +310,120 @@ async def test_unrecoverable_llm_error_stops_without_retry(tmp_path: Path) -> No
             retry_delay=0,
             task_label="测试任务",
         )
+    )
+    _ = await request_started.wait()
+    _ = task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        _ = await task
 
     assert handler.call_count == 1
-    assert caught_error.value.info.retryable is False
-    assert caught_error.value.info.category == "fatal"
+
+
+@pytest.mark.asyncio
+async def test_soft_stop_prevents_initial_physical_request(tmp_path: Path) -> None:
+    """运行已软停止时不获取许可，也不发送首次请求。"""
+    setup_logger(use_console=False, file_path=tmp_path / "stopped.log", enqueue_file_log=False)
+    stop_event = asyncio.Event()
+    stop_event.set()
+    handler = FakeLLMHandler(failures=[])
+    rate_limiter = CountingRateLimiter()
+
+    with pytest.raises(TranslationRequestStopped) as caught_error:
+        _ = await request_with_recoverable_retry_result(
+            llm_handler=handler,
+            model="fake-model",
+            messages=[ChatMessage(role="user", text="你好")],
+            retry_count=3,
+            retry_delay=0,
+            task_label="测试任务",
+            rate_limiter=rate_limiter,
+            stop_event=stop_event,
+        )
+
+    assert caught_error.value.attempt_count == 0
+    assert handler.call_count == 0
+    assert rate_limiter.acquire_count == 0
+
+
+@pytest.mark.asyncio
+async def test_soft_stop_interrupts_rate_limit_wait(tmp_path: Path) -> None:
+    """软停止立即取消仍在等待的请求许可。"""
+    setup_logger(use_console=False, file_path=tmp_path / "stop-limit.log", enqueue_file_log=False)
+    stop_event = asyncio.Event()
+    handler = FakeLLMHandler(failures=[])
+    rate_limiter = BlockingRateLimiter()
+    task = asyncio.create_task(
+        request_with_recoverable_retry_result(
+            llm_handler=handler,
+            model="fake-model",
+            messages=[ChatMessage(role="user", text="你好")],
+            retry_count=3,
+            retry_delay=0,
+            task_label="测试任务",
+            rate_limiter=rate_limiter,
+            stop_event=stop_event,
+        )
+    )
+    _ = await rate_limiter.entered.wait()
+    stop_event.set()
+
+    with pytest.raises(TranslationRequestStopped) as caught_error:
+        _ = await asyncio.wait_for(task, timeout=1)
+
+    assert caught_error.value.attempt_count == 0
+    assert handler.call_count == 0
+    assert rate_limiter.cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_soft_stop_prevents_retry_after_request_failure(tmp_path: Path) -> None:
+    """软停止允许当前请求结束，但禁止其后的重试。"""
+    setup_logger(use_console=False, file_path=tmp_path / "stop-retry.log", enqueue_file_log=False)
+    stop_event = asyncio.Event()
+    request = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+
+    class StopAfterFailureHandler(FakeLLMHandler):
+        @override
+        async def get_ai_response(
+            self,
+            *,
+            messages: list[ChatMessage],
+            model: str,
+            temperature: float | None = None,
+        ) -> str:
+            _ = messages
+            _ = model
+            _ = temperature
+            self.call_count: int = self.call_count + 1
+            _ = stop_event.set()
+            raise APIConnectionError(message="连接失败", request=request)
+
+    handler = StopAfterFailureHandler(failures=[])
+    rate_limiter = CountingRateLimiter()
+
+    with pytest.raises(TranslationRequestStopped) as caught_error:
+        _ = await request_with_recoverable_retry_result(
+            llm_handler=handler,
+            model="fake-model",
+            messages=[ChatMessage(role="user", text="你好")],
+            retry_count=3,
+            retry_delay=30,
+            task_label="测试任务",
+            rate_limiter=rate_limiter,
+            stop_event=stop_event,
+        )
+
     assert caught_error.value.attempt_count == 1
+    assert handler.call_count == 1
+    assert rate_limiter.acquire_count == 1
+
+
+@pytest.mark.parametrize("rpm", [0, -1, True])
+def test_rpm_rate_limiter_rejects_invalid_limit(rpm: int) -> None:
+    """RPM 必须是正整数，布尔值不得当作 1 使用。"""
+    with pytest.raises(ValueError, match="RPM 必须是大于 0 的整数"):
+        _ = RpmRateLimiter(rpm)
 
 
 @pytest.mark.asyncio
@@ -248,3 +458,23 @@ def test_llm_handler_rejects_streaming_request_body_extra() -> None:
             timeout=10,
             request_body_extra={"stream": True},
         )
+
+
+def test_llm_handler_disables_sdk_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SDK 不得在业务重试层之外自行重试请求。"""
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_async_openai(**kwargs: object) -> object:
+        captured_kwargs.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("app.llm.handler.AsyncOpenAI", fake_async_openai)
+    handler = LLMHandler()
+
+    handler.configure(
+        base_url="https://example.invalid/v1",
+        api_key="fake-key",
+        timeout=10,
+    )
+
+    assert captured_kwargs["max_retries"] == 0

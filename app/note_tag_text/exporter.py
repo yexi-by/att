@@ -1,16 +1,15 @@
 """Note 标签候选导出模块。"""
 
 import json
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 
 import aiofiles
 
-from app.note_tag_text.parser import iter_note_tag_matches
-from app.note_tag_text.sources import candidate_file_pattern, collect_note_tag_sources
+from app.note_tag_text.sources import NoteTagSource, candidate_file_pattern, collect_note_tag_sources
 from app.rmmz.schema import GameData
-from app.rmmz.text_rules import JsonArray, JsonObject, TextRules, get_default_text_rules
 from app.rmmz.text_protocol import normalize_visible_text_for_extraction
+from app.rmmz.text_rules import JsonArray, JsonObject, TextRules, get_default_text_rules
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,13 +63,25 @@ async def export_note_tag_candidates_file(
 
 def collect_note_tag_candidates(*, game_data: GameData, text_rules: TextRules) -> JsonArray:
     """收集标准 `data/*.json` 的 Note 标签候选摘要。"""
+    return collect_note_tag_candidates_from_sources(
+        sources=collect_note_tag_sources(game_data=game_data),
+        text_rules=text_rules,
+    )
+
+
+def collect_note_tag_candidates_from_sources(
+    *,
+    sources: list[NoteTagSource] | tuple[NoteTagSource, ...],
+    text_rules: TextRules,
+) -> JsonArray:
+    """基于已建立的 Note 索引生成候选摘要。"""
     stats: dict[tuple[str, str], JsonObject] = {}
     samples_by_key: dict[tuple[str, str], list[str]] = {}
     locations_by_key: dict[tuple[str, str], list[str]] = {}
     files_by_key: dict[tuple[str, str], set[str]] = {}
-    for source in collect_note_tag_sources(game_data=game_data):
+    for source in sources:
         file_pattern = candidate_file_pattern(source.file_name)
-        for match in iter_note_tag_matches(source.note_text):
+        for match in source.matches:
             key = (file_pattern, match.tag_name)
             stat = stats.setdefault(
                 key,
@@ -89,7 +100,7 @@ def collect_note_tag_candidates(*, game_data: GameData, text_rules: TextRules) -
             files.add(source.file_name)
             stat["matched_file_count"] = len(files)
             stat["hit_count"] = _json_int(stat["hit_count"]) + 1
-            if match.value_span is None:
+            if not match.has_value:
                 continue
             stat["value_hit_count"] = _json_int(stat["value_hit_count"]) + 1
             normalized_value = normalize_visible_text_for_extraction(
@@ -107,10 +118,7 @@ def collect_note_tag_candidates(*, game_data: GameData, text_rules: TextRules) -
             if location not in locations and len(locations) < 5:
                 locations.append(location)
                 stat["sample_locations"] = [sample_location for sample_location in locations]
-    return [
-        stats[key]
-        for key in sorted(stats, key=lambda item: (item[0], item[1]))
-    ]
+    return [stats[key] for key in sorted(stats, key=lambda item: (item[0], item[1]))]
 
 
 def _json_int(value: object) -> int:
@@ -136,5 +144,6 @@ def _candidate_int_sum(candidates: JsonArray, key: str) -> int:
 __all__: list[str] = [
     "NoteTagCandidateExport",
     "collect_note_tag_candidates",
+    "collect_note_tag_candidates_from_sources",
     "export_note_tag_candidates_file",
 ]

@@ -1,6 +1,7 @@
 """正文提示词使用的术语表索引。"""
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -71,11 +72,7 @@ class TerminologyPromptIndex:
         if display_name:
             selected.extend(self._entries_by_match_text.get(display_name, []))
 
-        joined_original_text = "\n".join(
-            line
-            for item in items
-            for line in item.original_lines
-        )
+        joined_original_text = "\n".join(line for item in items for line in item.original_lines)
         for item in items:
             if item.role is not None:
                 selected.extend(self._entries_by_match_text.get(item.role, []))
@@ -118,19 +115,13 @@ def _build_owner_entries(
             if item is None:
                 continue
             owner_key = f"{file_name}/{item.id}"
-            owner_entries.setdefault(owner_key, []).extend(
-                _entries_matching_text(glossary=glossary, text=item.name)
-            )
+            owner_entries.setdefault(owner_key, []).extend(_entries_matching_text(glossary=glossary, text=item.name))
             if file_name != "Actors.json":
                 continue
             owner_entries.setdefault(owner_key, []).extend(
                 _entries_matching_text(glossary=glossary, text=item.nickname)
             )
-    return {
-        owner_key: deduplicate_prompt_entries(entries)
-        for owner_key, entries in owner_entries.items()
-        if entries
-    }
+    return {owner_key: deduplicate_prompt_entries(entries) for owner_key, entries in owner_entries.items() if entries}
 
 
 def _build_system_entries(
@@ -174,13 +165,16 @@ def _entries_matching_text(*, glossary: TerminologyGlossary, text: str) -> list[
     return [TerminologyPromptEntry("glossary", source_text, translated_text)]
 
 
-def format_terminology_prompt_section(entries: list[TerminologyPromptEntry]) -> str:
+def filter_terminology_prompt_entries(
+    entries: Sequence[TerminologyPromptEntry],
+) -> list[TerminologyPromptEntry]:
+    """返回真正会进入模型提示词的去重术语。"""
+    return [entry for entry in deduplicate_prompt_entries(list(entries)) if not _is_prompt_noise_entry(entry)]
+
+
+def format_terminology_prompt_section(entries: Sequence[TerminologyPromptEntry]) -> str:
     """把术语映射格式化为用户提示词片段。"""
-    prompt_entries = [
-        entry
-        for entry in entries
-        if not _is_prompt_noise_entry(entry)
-    ]
+    prompt_entries = filter_terminology_prompt_entries(entries)
     if not prompt_entries:
         return ""
 
@@ -220,5 +214,6 @@ __all__: list[str] = [
     "TerminologyPromptEntry",
     "TerminologyPromptIndex",
     "deduplicate_prompt_entries",
+    "filter_terminology_prompt_entries",
     "format_terminology_prompt_section",
 ]

@@ -8,7 +8,6 @@ from .common import (
     AgentServiceContext,
     Path,
     TextRules,
-    TextScopeService,
     _classify_feedback_occurrences,
     _collect_feedback_text_occurrences,
     _count_feedback_gap_types,
@@ -47,7 +46,11 @@ class FeedbackAgentMixin:
             feedback_texts=feedback_texts,
         )
         async with await self.game_registry.open_game(game_title) as session:
-            setting = load_setting(self.setting_path, source_language=session.source_language)
+            setting = load_setting(
+                self.setting_path,
+                source_language=session.source_language,
+                additional_source_languages=session.additional_source_languages,
+            )
             custom_rules = await self._resolve_custom_rules(
                 session=session,
                 custom_placeholder_rules_text=None,
@@ -59,12 +62,13 @@ class FeedbackAgentMixin:
                 structured_placeholder_rules=structured_rules,
             )
             translated_items = await session.read_translated_items()
-            scope = await TextScopeService().build(
+            analysis_context = await self._build_game_analysis_context(
                 session=session,
                 game_data=game_data,
                 text_rules=text_rules,
                 translated_items=translated_items,
             )
+            scope = analysis_context.scope
         classified_occurrences = _classify_feedback_occurrences(
             occurrences=occurrences,
             scope=scope,
@@ -74,7 +78,12 @@ class FeedbackAgentMixin:
         if occurrences:
             errors.append(issue("feedback_text_still_exists", f"真实游戏文件中仍存在 {len(occurrences)} 处反馈原文"))
         if scope.stale_plugin_rules:
-            errors.append(issue("stale_plugin_rules", f"发现 {len(scope.stale_plugin_rules)} 个过期插件规则，请重新导出并导入插件规则"))
+            errors.append(
+                issue(
+                    "stale_plugin_rules",
+                    f"发现 {len(scope.stale_plugin_rules)} 个过期插件规则，请重新导出并导入插件规则",
+                )
+            )
         if scope.write_back_probe_error:
             errors.append(issue("write_probe_failed", scope.write_back_probe_error))
         return AgentReport.from_parts(

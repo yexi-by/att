@@ -1,3 +1,5 @@
+<!-- 此文件由 scripts/generate_skill_protocol.py 生成；请修改 skills/att-mz-protocol 后重新生成。 -->
+
 # CLI 命令契约
 
 本文件记录发行版 Skill 使用的命令入口、阶段用途、成功判断和失败处理。命令必须在 `<发行版目录>` 执行，默认前缀是：
@@ -7,6 +9,8 @@
 ```
 
 所有命令 stdout 默认输出机器可读 JSON；需要完整明细或业务文件时使用 `--output <文件>`。长任务会在 stderr 输出无 ANSI 进度行，stdout 的最终 JSON 才是命令结果。
+
+候选扫描命令的 stdout 只保留总数和前 20 条样例；完整候选明细只写入显式传入的 `--output <文件>`。不要从 stdout 省略部分反推完整结果，也不要省略需要留档的 `--output`。
 
 `validate-agent-workspace` 和 `validate-mv-virtual-namebox-rules` 的 stdout 是摘要报告；需要完整 `details` 明细时加 `--output <完整报告>`，stdout 仍只读摘要。
 
@@ -47,13 +51,15 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new()
 
 | 命令 | 用途 | 成功判断 | 失败处理 |
 | --- | --- | --- | --- |
+| `--version` | 显示当前 CLI、Python 包和发行版本 | 输出 `att-mz 0.1.15`，退出码为 0 | 版本不一致时停止，不混用其他源码、wheel 或原生扩展 |
+| `self-check --offline` | 检查本地配置、发行资源、schema 和 Rust 原生契约，全程不访问网络 | `status` 为 `ok`、`summary.offline` 为 `true`、`details.checks.network_accessed` 为 `false` | 修复缺失资源或版本不一致后重跑；不要改成联网探测 |
 | `list` | 列出当前已注册游戏 | 游戏清单可读取 | 未注册时先执行 add-game |
-| `doctor --no-check-llm` | 检查项目静态环境，不请求模型服务 | `status` 不是 `error` | 修环境后重跑，不启动翻译 |
-| `add-game --path <游戏目录> --source-language ja` | 按日文源语言注册干净原始游戏目录 | `summary.game_title` 可用于后续 `--game` | 目录已有可信源快照时换用干净原始游戏目录 |
-| `add-game --path <游戏目录> --source-language en` | 按英文源语言注册干净原始游戏目录 | `summary.game_title` 可用于后续 `--game` | 目录已有可信源快照时换用干净原始游戏目录 |
+| `doctor --no-check-llm` | 检查项目静态环境，不请求模型服务 | `status` 不是 `error`，并明确显示“仅完成本地对话结构检查，未访问模型” | 修环境后重跑，不启动翻译；不能把它描述成模型连通性已通过 |
+| `add-game --path <游戏目录> --source-language ja [--additional-source-language en]` | 按日文主源语言注册干净原始游戏目录；确有英文正文时显式追加英文 | `summary.game_title` 可用于后续 `--game`，语言配置与本轮请求一致 | 目录已有可信源快照时换用干净原始游戏目录；已注册游戏的语言配置不同则停止并明确重新注册或迁移 |
+| `add-game --path <游戏目录> --source-language en [--additional-source-language ja]` | 按英文主源语言注册干净原始游戏目录；确有日文正文时显式追加日文 | `summary.game_title` 可用于后续 `--game`，语言配置与本轮请求一致 | 目录已有可信源快照时换用干净原始游戏目录；已注册游戏的语言配置不同则停止并明确重新注册或迁移 |
 | `doctor --game <游戏标题> --no-check-llm` | 检查游戏绑定和规则状态 | `status` 不是 `error` | 缺规则时只允许继续准备工作区，不启动翻译或写回 |
 
-注册游戏必须显式传 `--source-language ja` 或 `--source-language en`，不做语言自动检测。
+注册游戏必须显式传 `--source-language ja` 或 `--source-language en`，不做语言自动检测。`--additional-source-language ja|en` 可以重复传入，但不能与主源语言相同；默认只扫描主源语言，追加语言只有显式注册后才参与范围、prompt 和质量检查。
 
 ## 工作区与规则导入
 
@@ -126,6 +132,8 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new()
 | `validate-source-residual-rules --game <游戏标题> --input <规则文件>` | 校验源文保留例外 | `status` 为 `ok` | 修例外规则，不关闭全局检测 |
 | `import-source-residual-rules --game <游戏标题> --input <规则文件>` | 保存源文保留例外 | `status` 为 `ok` | 回到 validate 修规则 |
 
+`translate` 的 JSON 固定包含 `outcome`、`stop_code`、`stop_message`，以及计划、派发、完成、未派发、取消、同轮复用、跨轮复用、冲突、物理请求和重试数量。`outcome` 只允许 `completed`、`completed_with_quality_errors`、`stopped`、`blocked`、`failed`、`cancelled`：干净完成和仅有质量错误退出 0，停止、阻断或失败退出 1，用户取消退出 130。`run-all` 只有在 `outcome=completed` 且没有质量错误时才允许执行 write-back；其他结果必须跳过写回并保留原始退出码。
+
 日文和英文游戏都使用通用源文残留命令。源文保留例外只用于确实不应翻译的片段，不能掩盖整句漏翻。
 
 ## 写进游戏文件与反馈定位
@@ -141,7 +149,8 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new()
 | `write-terminology --game <游戏标题>` | 术语专用写入，并保留已保存且可写的正文译文 | `status` 为 `ok`，摘要包含术语写入和保留正文译文数量 | 术语表、规则前置、可信源快照或已保存译文质量未通过时停止 |
 | `write-terminology --game <游戏标题> --confirm-font-overwrite` | 写入稳定名词并允许字体覆盖 | 用户已单独确认字体覆盖，且写回前流程检查通过，摘要可解释 | 未确认字体覆盖时不使用 |
 | `restore-font --game <游戏标题>` | 按原件还原项目覆盖过的字体引用 | 摘要可解释 | 缺原始备份或替换字体信息时停止说明 |
+| `recover-write-transaction --game <游戏标题>` | 恢复或完成清理上次未完成的写事务 | `summary.final_state` 为 `rolled_back`、`finalized` 或 `none`，恢复数量可解释 | 返回 `recovery_required` 或证据冲突时停止所有修改类命令，保留备份和 journal，不手工覆盖 |
 | `verify-feedback-text --game <游戏标题> --input <反馈原文清单>` | 在真实游戏文件中反查反馈原文 | `status` 为 `ok`，分类可解释 | 按规则缺口、译文缺口、写入缺口或插件源码硬编码分类处理 |
 | `scan-plugin-source-text --game <游戏标题> --output <风险报告文件>` | 扫描插件源码文本风险摘要；默认 `--view translation-source` | 输出文件存在，且不包含 AST selector 或完整候选列表，`summary.source_view` 可解释 | 高风险时暂停正文翻译；需要看当前运行文件时显式传 `--view active-runtime` |
 
-
+存在未完成写事务时，其他修改游戏文件的命令全部停止。先运行 `recover-write-transaction --game <游戏标题>`；恢复结果要求人工处理时，不删除 journal、备份或暂存证据。

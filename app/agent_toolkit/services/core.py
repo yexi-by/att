@@ -2,27 +2,31 @@
 # pyright: reportPrivateUsage=false
 # mixin 通过 AgentToolkitService 组合成同一个服务边界，允许调用同门面的受保护核心方法。
 
+from app.game_analysis import GameAnalysisContext, build_game_analysis_context
+from app.rmmz.game_file_view import GameFileView
+from app.rmmz.source_snapshot import validate_source_snapshot_manifest
+
 from .common import (
     AgentServiceContext,
     CustomPlaceholderRule,
     GameData,
+    PlaceholderRuleRecord,
     PluginTextRuleRecord,
     SourceResidualRuleRecord,
     StructuredPlaceholderRule,
+    StructuredPlaceholderRuleRecord,
     TargetGameSession,
     TextRules,
-    TextScopeService,
     TranslationData,
+    TranslationItem,
     build_source_residual_rule_records_from_import,
     load_active_runtime_game_data,
-    load_game_data_for_view,
     load_custom_placeholder_rules_text,
+    load_game_data_for_view,
     load_setting,
     parse_source_residual_rule_import_text,
     read_fresh_plugin_text_rules,
 )
-from app.rmmz.game_file_view import GameFileView
-from app.rmmz.source_snapshot import validate_source_snapshot_manifest
 
 
 class CoreAgentMixin:
@@ -91,13 +95,34 @@ class CoreAgentMixin:
         text_rules: TextRules,
     ) -> dict[str, TranslationData]:
         """按当前数据库规则提取本轮正文条目，不执行写入探针。"""
-        scope = await TextScopeService().build(
+        analysis_context = await self._build_game_analysis_context(
             session=session,
             game_data=game_data,
             text_rules=text_rules,
-            include_write_probe=False,
         )
-        return scope.translation_data_map
+        return analysis_context.translation_data_map
+
+    async def _build_game_analysis_context(
+        self: AgentServiceContext,
+        *,
+        session: TargetGameSession,
+        game_data: GameData,
+        text_rules: TextRules,
+        translated_items: list[TranslationItem] | None = None,
+        placeholder_rules: list[PlaceholderRuleRecord] | None = None,
+        structured_placeholder_rules: list[StructuredPlaceholderRuleRecord] | None = None,
+        include_write_probe: bool = False,
+    ) -> GameAnalysisContext:
+        """一次建立命令内共享的游戏数据、AST 和文本索引。"""
+        return await build_game_analysis_context(
+            session=session,
+            game_data=game_data,
+            text_rules=text_rules,
+            translated_items=translated_items,
+            placeholder_rules=placeholder_rules,
+            structured_placeholder_rules=structured_placeholder_rules,
+            include_write_probe=include_write_probe,
+        )
 
     async def _build_source_residual_rule_records(
         self: AgentServiceContext,
@@ -108,7 +133,11 @@ class CoreAgentMixin:
         """解析并按当前游戏提取结果校验源文残留例外规则。"""
         import_file = parse_source_residual_rule_import_text(rules_text)
         async with await self.game_registry.open_game(game_title) as session:
-            setting = load_setting(self.setting_path, source_language=session.source_language)
+            setting = load_setting(
+                self.setting_path,
+                source_language=session.source_language,
+                additional_source_languages=session.additional_source_languages,
+            )
             custom_rules = await self._resolve_custom_rules(
                 session=session,
                 custom_placeholder_rules_text=None,

@@ -1,3 +1,5 @@
+<!-- 此文件由 scripts/generate_skill_protocol.py 生成；请修改 skills/att-mz-protocol 后重新生成。 -->
+
 # 工作区 JSON 结构契约
 
 本文件记录 `prepare-agent-workspace` 生成或回填的常见文件。工作区文件是外部分析和 CLI 校验的唯一交换边界；定位键、路径、ID 和报告字段只按契约原样保留，不从中猜项目内部实现。

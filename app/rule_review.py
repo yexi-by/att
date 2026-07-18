@@ -2,13 +2,14 @@
 
 import hashlib
 import json
+from collections.abc import Sequence
 from typing import Literal
 
+from app.plugin_source_text import PluginSourceScan
 from app.plugin_text import build_plugins_file_hash
-from app.plugin_source_text import build_plugin_source_file_hash
 from app.rmmz.commands import iter_all_commands
 from app.rmmz.schema import GameData
-from app.rmmz.text_rules import JsonArray, JsonValue
+from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules
 
 type RuleReviewDomain = Literal[
     "plugin_text",
@@ -34,33 +35,50 @@ def plugin_rule_scope_hash(game_data: GameData) -> str:
     return build_plugins_file_hash(game_data.plugins_js)
 
 
-def plugin_source_rule_scope_hash(game_data: GameData) -> str:
-    """计算插件源码规则空结果审查依赖的当前启用插件源码哈希。"""
-    payload: JsonArray = []
-    enabled_file_names = {
-        f"{plugin.get('name')}.js"
-        for plugin in game_data.plugins_js
-        if plugin.get("status") is True and isinstance(plugin.get("name"), str)
-    }
-    for file_name, source in sorted(game_data.plugin_source_files.items()):
-        if file_name not in enabled_file_names:
-            continue
-        payload.append(
-            {
-                "file": file_name,
-                "hash": build_plugin_source_file_hash(source),
-            }
-        )
-    for file_name, error_text in sorted(game_data.plugin_source_read_errors.items()):
-        if file_name not in enabled_file_names:
-            continue
-        payload.append(
-            {
-                "file": file_name,
-                "read_error": error_text,
-            }
-        )
-    return _stable_json_hash(payload)
+def plugin_source_rule_scope_hash(*, scan: PluginSourceScan) -> str:
+    """按扫描事实计算完整启用插件源码集合与逐文件状态哈希。"""
+    enabled_plugin_files: JsonArray = [file_name for file_name in sorted(scan.enabled_plugin_files)]
+    file_states: JsonArray = []
+    for state in sorted(scan.enabled_file_states, key=lambda item: item.file_name):
+        payload: JsonObject = {
+            "file": state.file_name,
+            "status": state.status,
+        }
+        if state.status == "present":
+            payload["hash"] = state.file_hash
+        file_states.append(payload)
+    return _stable_json_hash(
+        {
+            "enabled_plugin_files": enabled_plugin_files,
+            "enabled_plugin_file_states": file_states,
+        }
+    )
+
+
+def plugin_source_text_rules_hash(text_rules: TextRules) -> str:
+    """计算会影响插件源码候选集合的完整文本规则指纹。"""
+    return _stable_json_hash(
+        {
+            "setting": text_rules.setting.model_dump(mode="json"),
+            "custom_placeholder_rules": [
+                {
+                    "pattern": rule.pattern_text,
+                    "placeholder_template": rule.placeholder_template,
+                }
+                for rule in text_rules.custom_placeholder_rules
+            ],
+            "structured_placeholder_rules": [
+                {
+                    "name": rule.rule_name,
+                    "type": rule.rule_type,
+                    "pattern": rule.pattern_text,
+                    "translatable_group": rule.translatable_group,
+                    "protected_groups": dict(sorted(rule.protected_groups.items())),
+                }
+                for rule in text_rules.structured_placeholder_rules
+            ],
+        }
+    )
 
 
 def event_command_rule_scope_hash(game_data: GameData) -> str:
@@ -71,7 +89,7 @@ def event_command_rule_scope_hash(game_data: GameData) -> str:
 
 def event_command_rule_scope_hash_for_codes(*, game_data: GameData, command_codes: frozenset[int]) -> str:
     """按指定事件指令编码计算空结果审查依赖的参数哈希。"""
-    command_snapshots: JsonArray = []
+    command_snapshots: list[JsonObject] = []
     for path, _display_name, command in iter_all_commands(game_data):
         if command.code not in command_codes:
             continue
@@ -82,10 +100,27 @@ def event_command_rule_scope_hash_for_codes(*, game_data: GameData, command_code
                 "parameters": [parameter for parameter in command.parameters],
             }
         )
+    return event_command_rule_scope_hash_for_snapshots(
+        command_snapshots=command_snapshots,
+        command_codes=command_codes,
+    )
+
+
+def event_command_rule_scope_hash_for_snapshots(
+    *,
+    command_snapshots: Sequence[JsonObject],
+    command_codes: frozenset[int],
+) -> str:
+    """按单命令上下文的预建事件指令快照计算范围哈希。"""
+    selected_snapshots: JsonArray = [
+        {key: value for key, value in snapshot.items()}
+        for snapshot in command_snapshots
+        if snapshot.get("code") in command_codes
+    ]
     return _stable_json_hash(
         {
             "command_codes": [code for code in sorted(command_codes)],
-            "commands": command_snapshots,
+            "commands": selected_snapshots,
         }
     )
 
@@ -174,12 +209,14 @@ __all__: list[str] = [
     "STRUCTURED_PLACEHOLDER_RULE_DOMAIN",
     "event_command_rule_scope_hash",
     "event_command_rule_scope_hash_for_codes",
+    "event_command_rule_scope_hash_for_snapshots",
     "note_tag_rule_scope_hash",
     "note_tag_rule_scope_hash_for_candidates",
     "parse_rule_review_domain",
     "placeholder_rule_scope_hash",
     "plugin_rule_scope_hash",
     "plugin_source_rule_scope_hash",
+    "plugin_source_text_rules_hash",
     "mv_virtual_namebox_rule_scope_hash",
     "structured_placeholder_rule_scope_hash",
 ]

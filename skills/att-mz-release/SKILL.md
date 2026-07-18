@@ -3,6 +3,8 @@ name: att-mz-release
 description: 仅在用户明确要求使用 A.T.T MZ 发行版执行或继续 RPG Maker MV/MZ 游戏翻译流程时使用，包括注册游戏、准备工作区、分析术语和文本规则、导入规则、调用模型翻译、检查译文、手动修复、写进游戏文件与试玩反馈补漏。
 ---
 
+<!-- 此文件由 scripts/generate_skill_protocol.py 生成；请修改 skills/att-mz-protocol 后重新生成。 -->
+
 # A.T.T MZ 发行版 Skill
 
 本 Skill 是翻译任务执行协议，不是项目说明书。主文件只描述阶段、边界、必读参考资料和停止条件；命令细节、JSON 结构、样例、任务单和失败恢复都按阶段读取 `references/`。

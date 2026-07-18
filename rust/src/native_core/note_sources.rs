@@ -4,8 +4,8 @@
 
 use serde_json::Value;
 
-use super::models::{NoteSourcesPayload, NoteTagSourceOutput};
-use super::rules::MAP_FILE_RE;
+use super::models::{NoteSourcesPayload, NoteTagMatchOutput, NoteTagSourceOutput};
+use super::rules::{MAP_FILE_RE, NOTE_TAG_RE};
 
 pub fn collect_note_tag_sources_impl(payload_json: &str) -> Result<String, String> {
     let payload: NoteSourcesPayload = serde_json::from_str(payload_json)
@@ -53,6 +53,7 @@ pub(crate) fn collect_note_tag_sources_in_value(
                 owner_path: owner_path.clone(),
                 note_text: note_value.to_string(),
                 location_prefix: format_location_prefix(file_name, owner_path),
+                matches: collect_note_tag_matches(note_value),
             });
         }
         for (key, child_value) in object {
@@ -76,6 +77,24 @@ pub(crate) fn collect_note_tag_sources_in_value(
             let _ = owner_path.pop();
         }
     }
+}
+
+fn collect_note_tag_matches(note_text: &str) -> Vec<NoteTagMatchOutput> {
+    NOTE_TAG_RE
+        .captures_iter(note_text)
+        .filter_map(|captures| {
+            let tag_name = captures.name("tag")?.as_str().trim();
+            if tag_name.is_empty() {
+                return None;
+            }
+            let value = captures.name("value");
+            Some(NoteTagMatchOutput {
+                tag_name: tag_name.to_string(),
+                value: value.map_or_else(String::new, |matched| matched.as_str().to_string()),
+                has_value: value.is_some(),
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn format_location_prefix(file_name: &str, owner_path: &[String]) -> String {

@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.rmmz.schema import GameData, PluginSourceTextRuleRecord
-from app.rmmz.text_rules import TextRules
+from app.rmmz.schema import PluginSourceTextRuleRecord
 
 from .models import PluginSourceCandidate, PluginSourceScan
-from .scanner import build_plugin_source_scan
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,16 +31,12 @@ class PluginSourceReviewCoverage:
 
 def filter_fresh_plugin_source_text_rules(
     *,
-    game_data: GameData,
     rule_records: list[PluginSourceTextRuleRecord],
-    text_rules: TextRules,
-    scan: PluginSourceScan | None = None,
+    scan: PluginSourceScan,
 ) -> tuple[list[PluginSourceTextRuleRecord], list[StalePluginSourceTextRule]]:
     """按当前源码文件、启用状态、文件哈希和 selector 命中筛出仍有效的源码规则。"""
     if not rule_records:
         return [], []
-    if scan is None:
-        scan = build_plugin_source_scan(game_data=game_data, text_rules=text_rules)
     file_scans = {file_scan.file_name: file_scan for file_scan in scan.files}
     fresh_rules: list[PluginSourceTextRuleRecord] = []
     stale_rules: list[StalePluginSourceTextRule] = []

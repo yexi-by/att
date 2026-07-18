@@ -15,8 +15,53 @@ pub(super) fn collect_overwide_details(
     item: &NativeTranslationItem,
     rules: &CompiledRules,
 ) -> Vec<Value> {
-    let original_text_width_limit = original_short_text_width_limit(item, rules);
     let mut details = Vec::new();
+    visit_overwide_lines(item, rules, |finding| {
+        let mut detail = base_detail(item);
+        detail.insert("line_index".to_string(), json!(finding.line_index));
+        detail.insert("line".to_string(), json!(finding.line));
+        detail.insert("line_width".to_string(), json!(finding.line_width));
+        detail.insert(
+            "line_width_limit".to_string(),
+            json!(finding.effective_limit),
+        );
+        if let Some(width) = finding.original_width {
+            detail.insert("original_line_width".to_string(), json!(width));
+            detail.insert(
+                "configured_line_width_limit".to_string(),
+                json!(rules.long_text_line_width_limit),
+            );
+        }
+        if let Some(width_limit) = finding.original_text_width_limit {
+            detail.insert("original_text_width_limit".to_string(), json!(width_limit));
+        }
+        details.push(Value::Object(detail));
+    });
+    details
+}
+
+/// 统计单条译文的超宽行，不构造报告明细。
+pub(super) fn count_overwide_lines(item: &NativeTranslationItem, rules: &CompiledRules) -> usize {
+    let mut count = 0;
+    visit_overwide_lines(item, rules, |_| count += 1);
+    count
+}
+
+struct OverwideLineFinding {
+    line_index: usize,
+    line: String,
+    line_width: usize,
+    effective_limit: usize,
+    original_width: Option<usize>,
+    original_text_width_limit: Option<usize>,
+}
+
+fn visit_overwide_lines(
+    item: &NativeTranslationItem,
+    rules: &CompiledRules,
+    mut visit: impl FnMut(OverwideLineFinding),
+) {
+    let original_text_width_limit = original_short_text_width_limit(item, rules);
     for (line_index, line, original_line) in iter_line_width_check_lines(item) {
         if line.is_empty() {
             continue;
@@ -35,24 +80,15 @@ pub(super) fn collect_overwide_details(
         if line_width <= effective_limit {
             continue;
         }
-        let mut detail = base_detail(item);
-        detail.insert("line_index".to_string(), json!(line_index));
-        detail.insert("line".to_string(), json!(line));
-        detail.insert("line_width".to_string(), json!(line_width));
-        detail.insert("line_width_limit".to_string(), json!(effective_limit));
-        if let Some(width) = original_width {
-            detail.insert("original_line_width".to_string(), json!(width));
-            detail.insert(
-                "configured_line_width_limit".to_string(),
-                json!(rules.long_text_line_width_limit),
-            );
-        }
-        if let Some(width_limit) = original_text_width_limit {
-            detail.insert("original_text_width_limit".to_string(), json!(width_limit));
-        }
-        details.push(Value::Object(detail));
+        visit(OverwideLineFinding {
+            line_index,
+            line,
+            line_width,
+            effective_limit,
+            original_width,
+            original_text_width_limit,
+        });
     }
-    details
 }
 
 fn original_short_text_width_limit(

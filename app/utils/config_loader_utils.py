@@ -62,6 +62,7 @@ def load_setting(
     setting_path: str | Path | None = None,
     overrides: SettingOverrides | None = None,
     source_language: SourceLanguage = DEFAULT_SOURCE_LANGUAGE,
+    additional_source_languages: tuple[SourceLanguage, ...] = (),
 ) -> Setting:
     """加载并校验当前配置。"""
     resolved_setting_path = resolve_setting_path(setting_path)
@@ -69,6 +70,7 @@ def load_setting(
     apply_language_profile_to_raw_config(
         raw_config=raw_config,
         source_language=source_language,
+        additional_source_languages=additional_source_languages,
     )
     apply_setting_overrides(raw_config=raw_config, overrides=overrides)
     environment_overrides = load_environment_overrides()
@@ -90,6 +92,7 @@ def load_setting(
             overrides=overrides,
             environment_overrides=environment_overrides,
             source_language=source_language,
+            additional_source_languages=additional_source_languages,
         )
     )
     return setting
@@ -98,9 +101,7 @@ def load_setting(
 def _read_toml_data(setting_path: Path) -> dict[str, object]:
     """读取原始 TOML 数据。"""
     if not setting_path.exists():
-        logger.error(
-            f"[tag.failure]配置文件未找到[/tag.failure] [tag.path]{setting_path}[/tag.path]"
-        )
+        logger.error(f"[tag.failure]配置文件未找到[/tag.failure] [tag.path]{setting_path}[/tag.path]")
         raise FileNotFoundError(f"配置文件未找到: {setting_path}")
 
     raw_setting = setting_path.read_text(encoding="utf-8-sig")
@@ -161,19 +162,12 @@ def _render_text_translation_prompt_template(
     marker_hits = [marker for marker in PROMPT_TEMPLATE_MARKERS if marker in system_prompt]
     if not marker_hits:
         protocol = (
-            SOURCE_LINES_ENABLED_FALLBACK_PROTOCOL
-            if include_source_lines
-            else SOURCE_LINES_DISABLED_FALLBACK_PROTOCOL
+            SOURCE_LINES_ENABLED_FALLBACK_PROTOCOL if include_source_lines else SOURCE_LINES_DISABLED_FALLBACK_PROTOCOL
         )
         return system_prompt.rstrip() + protocol
     if len(marker_hits) != len(PROMPT_TEMPLATE_MARKERS):
-        missing_markers = [
-            marker for marker in PROMPT_TEMPLATE_MARKERS if marker not in system_prompt
-        ]
-        raise ValueError(
-            "正文翻译提示词模板缺少必要占位符: "
-            + "、".join(missing_markers)
-        )
+        missing_markers = [marker for marker in PROMPT_TEMPLATE_MARKERS if marker not in system_prompt]
+        raise ValueError("正文翻译提示词模板缺少必要占位符: " + "、".join(missing_markers))
 
     if include_source_lines:
         response_fields = SOURCE_LINES_ENABLED_FIELDS
@@ -228,6 +222,7 @@ def _build_setting_summary(
     overrides: SettingOverrides | None,
     environment_overrides: EnvironmentOverrides,
     source_language: SourceLanguage,
+    additional_source_languages: tuple[SourceLanguage, ...],
 ) -> str:
     """构造适合直接输出到日志的配置摘要。"""
     text_service = setting.llm
@@ -244,7 +239,7 @@ def _build_setting_summary(
         f"配置文件: [tag.path]{setting_path}[/tag.path]",
         f"正文接口: OpenAI 兼容 / 模型 [tag.count]{text_service.model}[/tag.count] / 地址 [tag.path]{text_service.base_url}[/tag.path] / 超时 [tag.count]{text_service.timeout}[/tag.count] 秒",
         f"模型请求额外参数: [tag.count]{len(text_service.request_body_extra)}[/tag.count] 项",
-        f"源语言: [tag.count]{source_language}[/tag.count] / 目标语言 [tag.count]zh-Hans[/tag.count]",
+        f"源语言: [tag.count]{source_language}[/tag.count] / 追加源语言 [tag.count]{','.join(additional_source_languages) or '无'}[/tag.count] / 目标语言 [tag.count]zh-Hans[/tag.count]",
         f"正文切块: 目标 [tag.count]{setting.translation_context.token_size}[/tag.count] token，换算系数 [tag.count]{setting.translation_context.factor}[/tag.count]，同角色最多连续 [tag.count]{setting.translation_context.max_command_items}[/tag.count] 条",
         f"正文翻译: [tag.count]{setting.text_translation.worker_count}[/tag.count] 个 worker，RPM [tag.count]{setting.text_translation.rpm or '不限'}[/tag.count]，失败重试 [tag.count]{setting.text_translation.retry_count}[/tag.count] 次，间隔 [tag.count]{setting.text_translation.retry_delay}[/tag.count] 秒",
         f"模型输出原文对照: [tag.count]{'开启' if setting.text_translation.include_source_lines else '关闭'}[/tag.count]",

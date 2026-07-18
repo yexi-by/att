@@ -101,7 +101,7 @@ class EventCommandTextSetting(StrictBaseModel):
         return normalized_map
 
     def default_codes_for_engine(self, engine_kind: EngineKind) -> list[int]:
-        """按引擎返回默认事件指令编码，引擎配置优先于旧配置。"""
+        """按引擎返回默认事件指令编码，引擎配置优先于通用配置。"""
         engine_codes = self.default_command_codes_by_engine.get(engine_kind)
         if engine_codes is not None:
             return list(engine_codes)
@@ -133,6 +133,10 @@ class TextRulesSetting(StrictBaseModel):
     """可配置的文本判断规则。"""
 
     source_language: SourceLanguage = Field(default=DEFAULT_SOURCE_LANGUAGE, title="源语言")
+    additional_source_languages: list[SourceLanguage] = Field(
+        default_factory=list,
+        title="注册时显式附加的源语言",
+    )
     source_residual_label: str = Field(default="日文", title="源文残留展示名称")
     strip_wrapping_punctuation_pairs: list[tuple[str, str]] = Field(
         default_factory=lambda: [("「", "」")],
@@ -142,9 +146,7 @@ class TextRulesSetting(StrictBaseModel):
         default_factory=lambda: [("「", "」"), ("『", "』")],
         title="译文必须按源文保留的成对包裹标点",
     )
-    source_residual_allowed_chars: list[str] = Field(
-        default_factory=lambda: ["っ", "ッ", "ー", "・", "。", "～", "…"]
-    )
+    source_residual_allowed_chars: list[str] = Field(default_factory=lambda: ["っ", "ッ", "ー", "・", "。", "～", "…"])
     source_residual_allowed_tail_chars: list[str] = Field(
         default_factory=lambda: [
             "あ",

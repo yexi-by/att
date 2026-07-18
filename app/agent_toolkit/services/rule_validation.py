@@ -2,7 +2,48 @@
 # pyright: reportPrivateUsage=false
 # mixin 通过 AgentToolkitService 组合成同一个服务边界，允许调用同门面的受保护核心方法。
 
+from app.application.flow_gate import (
+    ensure_empty_rule_confirmed,
+)
+from app.application.mutation_guard import open_game_for_mutation
+from app.application.rule_import_backup import write_rule_import_translation_backup
+from app.event_command_text.index import build_event_command_analysis_index
+from app.note_tag_text.exporter import collect_note_tag_candidates_from_sources
+from app.note_tag_text.sources import collect_note_tag_sources
+from app.persistence import RecoveryRequiredError
+from app.plugin_source_text import (
+    PluginSourceScan,
+    PluginSourceTextExtraction,
+    build_plugin_source_raw_index,
+    build_plugin_source_rule_records_from_import,
+    collect_plugin_source_review_coverage,
+    derive_plugin_source_scan,
+    parse_plugin_source_rule_import_text,
+    plugin_source_rule_records_to_import_json,
+)
+from app.plugin_text.index import build_plugin_parameter_analysis_index
+from app.rmmz.mv_namebox import (
+    collect_mv_virtual_namebox_candidates_from_command_snapshots,
+    mv_virtual_namebox_candidate_details_from_candidates,
+    mv_virtual_namebox_candidates_payload_from_candidates,
+    mv_virtual_namebox_rule_records_to_import_json,
+    parse_mv_virtual_namebox_rule_import_text,
+    validate_mv_virtual_namebox_rules_against_candidates,
+)
+from app.rmmz.schema import GameData, MvVirtualNameboxRuleRecord, TranslationItem
+from app.rule_review import (
+    MV_VIRTUAL_NAMEBOX_RULE_DOMAIN,
+    NOTE_TAG_TEXT_RULE_DOMAIN,
+    PLUGIN_SOURCE_TEXT_RULE_DOMAIN,
+    mv_virtual_namebox_rule_scope_hash,
+    note_tag_rule_scope_hash_for_candidates,
+    plugin_source_rule_scope_hash,
+    plugin_source_text_rules_hash,
+)
+from app.text_scope.write_probe import collect_write_back_probe_reasons
+
 from .common import (
+    PLUGINS_FILE_NAME,
     AgentIssue,
     AgentReport,
     AgentServiceContext,
@@ -11,7 +52,6 @@ from .common import (
     JsonObject,
     JsonValue,
     NoteTagTextExtraction,
-    PLUGINS_FILE_NAME,
     Path,
     PluginTextExtraction,
     TextRules,
@@ -32,35 +72,6 @@ from .common import (
     parse_note_tag_rule_import_text,
     parse_plugin_rule_import_text,
 )
-from app.application.rule_import_backup import write_rule_import_translation_backup
-from app.application.flow_gate import (
-    ensure_empty_rule_confirmed,
-    note_tag_rule_scope_hash_for_text_rules,
-)
-from app.plugin_source_text import (
-    PluginSourceTextExtraction,
-    build_plugin_source_rule_records_from_import,
-    build_plugin_source_scan,
-    collect_plugin_source_review_coverage,
-    parse_plugin_source_rule_import_text,
-    plugin_source_rule_records_to_import_json,
-)
-from app.rmmz.mv_namebox import (
-    mv_virtual_namebox_candidates_payload,
-    mv_virtual_namebox_candidate_details,
-    mv_virtual_namebox_rule_records_to_import_json,
-    parse_mv_virtual_namebox_rule_import_text,
-    validate_mv_virtual_namebox_rules_against_game,
-)
-from app.rmmz.schema import GameData, MvVirtualNameboxRuleRecord, TranslationItem
-from app.rule_review import (
-    MV_VIRTUAL_NAMEBOX_RULE_DOMAIN,
-    NOTE_TAG_TEXT_RULE_DOMAIN,
-    PLUGIN_SOURCE_TEXT_RULE_DOMAIN,
-    plugin_source_rule_scope_hash,
-    mv_virtual_namebox_rule_scope_hash,
-)
-from app.text_scope.write_probe import collect_write_back_probe_reasons
 
 
 def _collect_plugin_source_unwritable_items(
@@ -104,13 +115,19 @@ class RuleValidationAgentMixin:
                 summary={"output": str(output_path), "candidate_count": 0},
                 details={},
             )
-        payload = mv_virtual_namebox_candidates_payload(game_data)
+        command_index = build_event_command_analysis_index(game_data)
+        candidates = collect_mv_virtual_namebox_candidates_from_command_snapshots(
+            tuple((entry.location_path, entry.display_name, entry.command) for entry in command_index)
+        )
+        payload = mv_virtual_namebox_candidates_payload_from_candidates(candidates)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         await _write_json_object(output_path, payload)
         candidate_count = _summary_int_from_payload(payload, "candidate_count")
         warnings: list[AgentIssue] = []
         if candidate_count == 0:
-            warnings.append(issue("mv_virtual_namebox_candidates_empty", "当前 MV 游戏没有发现 `101` 后首条非空 `401` 候选"))
+            warnings.append(
+                issue("mv_virtual_namebox_candidates_empty", "当前 MV 游戏没有发现 `101` 后首条非空 `401` 候选")
+            )
         return AgentReport.from_parts(
             errors=[],
             warnings=warnings,
@@ -140,7 +157,9 @@ class RuleValidationAgentMixin:
                 if game_data.layout.engine_kind == "mv":
                     existing_records = await session.read_mv_virtual_namebox_rules()
             if game_data.layout.engine_kind != "mv":
-                errors.append(issue("mv_virtual_namebox_rules_forbidden", "MV 虚拟名字框规则只允许 RPG Maker MV 游戏使用"))
+                errors.append(
+                    issue("mv_virtual_namebox_rules_forbidden", "MV 虚拟名字框规则只允许 RPG Maker MV 游戏使用")
+                )
                 return AgentReport.from_parts(
                     errors=errors,
                     warnings=[],
@@ -152,26 +171,29 @@ class RuleValidationAgentMixin:
                     },
                     details=details,
                 )
-            candidates = mv_virtual_namebox_candidate_details(game_data)
+            command_index = build_event_command_analysis_index(game_data)
+            candidates = collect_mv_virtual_namebox_candidates_from_command_snapshots(
+                tuple((entry.location_path, entry.display_name, entry.command) for entry in command_index)
+            )
             candidate_count = len(candidates)
-            rule_errors, match_details = validate_mv_virtual_namebox_rules_against_game(
+            rule_errors, match_details = validate_mv_virtual_namebox_rules_against_candidates(
                 game_data=game_data,
                 records=records,
+                candidates=candidates,
             )
             errors.extend(
                 issue("mv_virtual_namebox_rules_invalid", _format_mv_namebox_rule_error(error_detail))
                 for error_detail in rule_errors
             )
             matched_candidate_count = len(match_details)
-            _existing_errors, existing_match_details = validate_mv_virtual_namebox_rules_against_game(
+            _existing_errors, existing_match_details = validate_mv_virtual_namebox_rules_against_candidates(
                 game_data=game_data,
                 records=existing_records,
+                candidates=candidates,
             )
             existing_match_keys = _mv_namebox_match_keys(existing_match_details)
             newly_matched_candidates: JsonArray = [
-                detail
-                for detail in match_details
-                if _mv_namebox_match_key(detail) not in existing_match_keys
+                detail for detail in match_details if _mv_namebox_match_key(detail) not in existing_match_keys
             ]
             newly_matched_candidate_count = len(newly_matched_candidates)
             details = {
@@ -185,7 +207,9 @@ class RuleValidationAgentMixin:
             elif matched_candidate_count == 0 and candidate_count > 0:
                 warnings.append(issue("mv_virtual_namebox_rules_no_hits", "MV 虚拟名字框规则没有命中任何候选"))
         except Exception as error:
-            errors.append(issue("mv_virtual_namebox_rules_invalid", f"MV 虚拟名字框规则不可导入: {type(error).__name__}: {error}"))
+            errors.append(
+                issue("mv_virtual_namebox_rules_invalid", f"MV 虚拟名字框规则不可导入: {type(error).__name__}: {error}")
+            )
             records = []
         return AgentReport.from_parts(
             errors=errors,
@@ -211,13 +235,18 @@ class RuleValidationAgentMixin:
             records = parse_mv_virtual_namebox_rule_import_text(rules_text)
             if not records and not confirm_empty:
                 raise RuntimeError("MV 虚拟名字框规则为空，必须确认当前游戏不需要虚拟名字框后传 --confirm-empty")
-            async with await self.game_registry.open_game(game_title) as session:
+            async with await open_game_for_mutation(self.game_registry, game_title) as session:
                 game_data = await self._load_translation_source_game_data(session)
                 if game_data.layout.engine_kind != "mv":
                     raise RuntimeError("MV 虚拟名字框规则只允许 RPG Maker MV 游戏使用")
-                rule_errors, match_details = validate_mv_virtual_namebox_rules_against_game(
+                command_index = build_event_command_analysis_index(game_data)
+                candidates = collect_mv_virtual_namebox_candidates_from_command_snapshots(
+                    tuple((entry.location_path, entry.display_name, entry.command) for entry in command_index)
+                )
+                rule_errors, match_details = validate_mv_virtual_namebox_rules_against_candidates(
                     game_data=game_data,
                     records=records,
+                    candidates=candidates,
                 )
                 if rule_errors:
                     messages = "；".join(_format_mv_namebox_rule_error(error_detail) for error_detail in rule_errors)
@@ -229,13 +258,20 @@ class RuleValidationAgentMixin:
                     await session.replace_rule_review_state(
                         rule_domain=MV_VIRTUAL_NAMEBOX_RULE_DOMAIN,
                         scope_hash=mv_virtual_namebox_rule_scope_hash(
-                            mv_virtual_namebox_candidate_details(game_data)
+                            mv_virtual_namebox_candidate_details_from_candidates(candidates)
                         ),
                         reviewed_empty=True,
                     )
+        except RecoveryRequiredError:
+            raise
         except Exception as error:
             return AgentReport.from_parts(
-                errors=[issue("mv_virtual_namebox_rules_invalid", f"MV 虚拟名字框规则导入失败: {type(error).__name__}: {error}")],
+                errors=[
+                    issue(
+                        "mv_virtual_namebox_rules_invalid",
+                        f"MV 虚拟名字框规则导入失败: {type(error).__name__}: {error}",
+                    )
+                ],
                 warnings=[],
                 summary={"rule_count": 0, "matched_candidate_count": 0},
                 details={},
@@ -262,7 +298,11 @@ class RuleValidationAgentMixin:
     ) -> AgentReport:
         """导出标准 data JSON Note 标签候选，供外部 Agent 判断可见文本标签。"""
         async with await self.game_registry.open_game(game_title) as session:
-            setting = load_setting(self.setting_path, source_language=session.source_language)
+            setting = load_setting(
+                self.setting_path,
+                source_language=session.source_language,
+                additional_source_languages=session.additional_source_languages,
+            )
             custom_rules = await self._resolve_custom_rules(
                 session=session,
                 custom_placeholder_rules_text=None,
@@ -302,7 +342,11 @@ class RuleValidationAgentMixin:
         try:
             import_file = parse_note_tag_rule_import_text(rules_text)
             async with await self.game_registry.open_game(game_title) as session:
-                setting = load_setting(self.setting_path, source_language=session.source_language)
+                setting = load_setting(
+                    self.setting_path,
+                    source_language=session.source_language,
+                    additional_source_languages=session.additional_source_languages,
+                )
                 custom_rules = await self._resolve_custom_rules(
                     session=session,
                     custom_placeholder_rules_text=None,
@@ -315,20 +359,20 @@ class RuleValidationAgentMixin:
                 )
                 game_data = await self._load_translation_source_game_data(session)
                 translated_paths: set[str] = await session.read_translation_location_paths()
+            note_sources = tuple(collect_note_tag_sources(game_data=game_data))
             records = build_note_tag_rule_records_from_import(
                 game_data=game_data,
                 import_file=import_file,
                 text_rules=text_rules,
+                note_sources=note_sources,
             )
             extracted_map = NoteTagTextExtraction(
                 game_data=game_data,
                 rule_records=records,
                 text_rules=text_rules,
-            ).extract_all_text()
+            ).extract_all_text_from_sources(note_sources)
             extracted_items = [
-                item
-                for translation_data in extracted_map.values()
-                for item in translation_data.translation_items
+                item for translation_data in extracted_map.values() for item in translation_data.translation_items
             ]
             unwritable_items = _collect_write_protocol_unwritable_items(
                 game_data=game_data,
@@ -357,7 +401,9 @@ class RuleValidationAgentMixin:
                     "reason": f"{type(error).__name__}: {error}",
                 }
             if unwritable_items:
-                errors.append(issue("note_tag_write_back_unwritable", f"Note 标签规则存在 {len(unwritable_items)} 个不可写命中项"))
+                errors.append(
+                    issue("note_tag_write_back_unwritable", f"Note 标签规则存在 {len(unwritable_items)} 个不可写命中项")
+                )
             unwritable_items_by_path = _json_items_by_location_path(unwritable_items)
             details["rules"] = [
                 {
@@ -371,11 +417,9 @@ class RuleValidationAgentMixin:
                     ),
                 }
                 for record in records
-                for record_items in [[
-                    item
-                    for item in extracted_items
-                    if _note_tag_item_matches_rule(item=item, rule_record=record)
-                ]]
+                for record_items in [
+                    [item for item in extracted_items if _note_tag_item_matches_rule(item=item, rule_record=record)]
+                ]
             ]
             if not records:
                 warnings.append(issue("note_tag_rules_empty", "Note 标签规则为空"))
@@ -410,8 +454,12 @@ class RuleValidationAgentMixin:
         """校验并导入当前游戏的 Note 标签文本规则。"""
         try:
             import_file = parse_note_tag_rule_import_text(rules_text)
-            async with await self.game_registry.open_game(game_title) as session:
-                setting = load_setting(self.setting_path, source_language=session.source_language)
+            async with await open_game_for_mutation(self.game_registry, game_title) as session:
+                setting = load_setting(
+                    self.setting_path,
+                    source_language=session.source_language,
+                    additional_source_languages=session.additional_source_languages,
+                )
                 custom_rules = await self._resolve_custom_rules(
                     session=session,
                     custom_placeholder_rules_text=None,
@@ -423,10 +471,12 @@ class RuleValidationAgentMixin:
                     structured_placeholder_rules=structured_rules,
                 )
                 game_data = await self._load_translation_source_game_data(session)
+                note_sources = tuple(collect_note_tag_sources(game_data=game_data))
                 records = build_note_tag_rule_records_from_import(
                     game_data=game_data,
                     import_file=import_file,
                     text_rules=text_rules,
+                    note_sources=note_sources,
                 )
                 if not records:
                     ensure_empty_rule_confirmed(
@@ -439,14 +489,14 @@ class RuleValidationAgentMixin:
                         game_data=game_data,
                         rule_records=old_records,
                         text_rules=text_rules,
-                    ).extract_all_text()
+                    ).extract_all_text_from_sources(note_sources)
                 )
                 new_note_paths = collect_translation_data_paths(
                     NoteTagTextExtraction(
                         game_data=game_data,
                         rule_records=records,
                         text_rules=text_rules,
-                    ).extract_all_text()
+                    ).extract_all_text_from_sources(note_sources)
                 )
                 stale_paths = sorted(old_note_paths - new_note_paths)
                 deleted_translation_items = 0
@@ -467,12 +517,16 @@ class RuleValidationAgentMixin:
                 else:
                     await session.replace_rule_review_state(
                         rule_domain=NOTE_TAG_TEXT_RULE_DOMAIN,
-                        scope_hash=note_tag_rule_scope_hash_for_text_rules(
-                            game_data=game_data,
-                            text_rules=text_rules,
+                        scope_hash=note_tag_rule_scope_hash_for_candidates(
+                            collect_note_tag_candidates_from_sources(
+                                sources=note_sources,
+                                text_rules=text_rules,
+                            )
                         ),
                         reviewed_empty=True,
                     )
+        except RecoveryRequiredError:
+            raise
         except Exception as error:
             return AgentReport.from_parts(
                 errors=[issue("note_tag_rules_invalid", f"Note 标签规则不可导入: {type(error).__name__}: {error}")],
@@ -526,7 +580,9 @@ class RuleValidationAgentMixin:
             details=details,
         )
 
-    async def validate_source_residual_rules(self: AgentServiceContext, *, game_title: str, rules_text: str) -> AgentReport:
+    async def validate_source_residual_rules(
+        self: AgentServiceContext, *, game_title: str, rules_text: str
+    ) -> AgentReport:
         """校验源文残留例外规则 JSON 文本并报告命中情况。"""
         errors: list[AgentIssue] = []
         warnings: list[AgentIssue] = []
@@ -551,7 +607,9 @@ class RuleValidationAgentMixin:
             if not records:
                 warnings.append(issue("source_residual_rules_empty", "源文残留例外规则为空"))
         except Exception as error:
-            errors.append(issue("source_residual_rules_invalid", f"源文残留例外规则不可导入: {type(error).__name__}: {error}"))
+            errors.append(
+                issue("source_residual_rules_invalid", f"源文残留例外规则不可导入: {type(error).__name__}: {error}")
+            )
             records = []
         return AgentReport.from_parts(
             errors=errors,
@@ -565,18 +623,24 @@ class RuleValidationAgentMixin:
             details=details,
         )
 
-    async def import_source_residual_rules(self: AgentServiceContext, *, game_title: str, rules_text: str) -> AgentReport:
+    async def import_source_residual_rules(
+        self: AgentServiceContext, *, game_title: str, rules_text: str
+    ) -> AgentReport:
         """校验并导入当前游戏的源文残留例外规则。"""
         try:
             records = await self._build_source_residual_rule_records(
                 game_title=game_title,
                 rules_text=rules_text,
             )
-            async with await self.game_registry.open_game(game_title) as session:
+            async with await open_game_for_mutation(self.game_registry, game_title) as session:
                 await session.replace_source_residual_rules(records)
+        except RecoveryRequiredError:
+            raise
         except Exception as error:
             return AgentReport.from_parts(
-                errors=[issue("source_residual_rules_invalid", f"源文残留例外规则不可导入: {type(error).__name__}: {error}")],
+                errors=[
+                    issue("source_residual_rules_invalid", f"源文残留例外规则不可导入: {type(error).__name__}: {error}")
+                ],
                 warnings=[],
                 summary={"rule_count": 0, "position_rule_count": 0, "structural_rule_count": 0, "term_count": 0},
                 details={},
@@ -614,7 +678,11 @@ class RuleValidationAgentMixin:
         try:
             import_file = parse_plugin_rule_import_text(rules_text)
             async with await self.game_registry.open_game(game_title) as session:
-                setting = load_setting(self.setting_path, source_language=session.source_language)
+                setting = load_setting(
+                    self.setting_path,
+                    source_language=session.source_language,
+                    additional_source_languages=session.additional_source_languages,
+                )
                 custom_rules = await self._resolve_custom_rules(
                     session=session,
                     custom_placeholder_rules_text=None,
@@ -627,20 +695,20 @@ class RuleValidationAgentMixin:
                 custom_placeholder_rules=custom_rules,
                 structured_placeholder_rules=structured_rules,
             )
+            plugin_index = build_plugin_parameter_analysis_index(game_data)
             records = build_plugin_rule_records_from_import(
                 game_data=game_data,
                 import_file=import_file,
                 text_rules=text_rules,
+                plugin_index=plugin_index,
             )
             extracted_map = PluginTextExtraction(
                 game_data,
                 plugin_rule_records=records,
                 text_rules=text_rules,
-            ).extract_all_text()
+            ).extract_all_text_from_index(plugin_index)
             extracted_items = [
-                item
-                for translation_data in extracted_map.values()
-                for item in translation_data.translation_items
+                item for translation_data in extracted_map.values() for item in translation_data.translation_items
             ]
             unwritable_items = _collect_write_protocol_unwritable_items(
                 game_data=game_data,
@@ -663,11 +731,13 @@ class RuleValidationAgentMixin:
                     ),
                 }
                 for record in records
-                for record_items in [[
-                    item
-                    for item in extracted_items
-                    if item.location_path.startswith(f"{PLUGINS_FILE_NAME}/{record.plugin_index}/")
-                ]]
+                for record_items in [
+                    [
+                        item
+                        for item in extracted_items
+                        if item.location_path.startswith(f"{PLUGINS_FILE_NAME}/{record.plugin_index}/")
+                    ]
+                ]
             ]
             if not records:
                 warnings.append(issue("plugin_rules_empty", "插件规则为空"))
@@ -694,7 +764,9 @@ class RuleValidationAgentMixin:
             details=details,
         )
 
-    async def validate_plugin_source_rules(self: AgentServiceContext, *, game_title: str, rules_text: str) -> AgentReport:
+    async def validate_plugin_source_rules(
+        self: AgentServiceContext, *, game_title: str, rules_text: str
+    ) -> AgentReport:
         """校验插件源码文本规则 JSON 文本并报告命中情况。"""
         errors: list[AgentIssue] = []
         warnings: list[AgentIssue] = []
@@ -703,7 +775,11 @@ class RuleValidationAgentMixin:
         try:
             import_file = parse_plugin_source_rule_import_text(rules_text)
             async with await self.game_registry.open_game(game_title) as session:
-                setting = load_setting(self.setting_path, source_language=session.source_language)
+                setting = load_setting(
+                    self.setting_path,
+                    source_language=session.source_language,
+                    additional_source_languages=session.additional_source_languages,
+                )
                 custom_rules = await self._resolve_custom_rules(
                     session=session,
                     custom_placeholder_rules_text=None,
@@ -716,11 +792,12 @@ class RuleValidationAgentMixin:
                 )
                 game_data = await self._load_translation_source_game_data(session)
                 translated_paths: set[str] = await session.read_translation_location_paths()
-            scan = build_plugin_source_scan(game_data=game_data, text_rules=text_rules)
+            plugin_source_raw_index = build_plugin_source_raw_index(game_data=game_data)
+            scan = derive_plugin_source_scan(index=plugin_source_raw_index, text_rules=text_rules)
+            if scan.risk.read_error_file_count:
+                return _plugin_source_rules_read_error_report(scan)
             records = build_plugin_source_rule_records_from_import(
-                game_data=game_data,
                 import_file=import_file,
-                text_rules=text_rules,
                 scan=scan,
             )
             review = collect_plugin_source_review_coverage(scan=scan, rule_records=records)
@@ -732,9 +809,7 @@ class RuleValidationAgentMixin:
                 scan=scan,
             ).extract_all_text()
             extracted_items = [
-                item
-                for translation_data in extracted_map.values()
-                for item in translation_data.translation_items
+                item for translation_data in extracted_map.values() for item in translation_data.translation_items
             ]
             unwritable_items = _collect_plugin_source_unwritable_items(
                 game_data=game_data,
@@ -764,11 +839,13 @@ class RuleValidationAgentMixin:
                     ),
                 }
                 for record in records
-                for record_items in [[
-                    item
-                    for item in extracted_items
-                    if item.location_path.startswith(f"js/plugins/{record.file_name}/")
-                ]]
+                for record_items in [
+                    [
+                        item
+                        for item in extracted_items
+                        if item.location_path.startswith(f"js/plugins/{record.file_name}/")
+                    ]
+                ]
             ]
             if not records:
                 warnings.append(issue("plugin_source_rules_empty", "插件源码规则为空"))
@@ -785,7 +862,9 @@ class RuleValidationAgentMixin:
                 else:
                     warnings.append(review_issue)
         except Exception as error:
-            errors.append(issue("plugin_source_rules_invalid", f"插件源码规则不可导入: {type(error).__name__}: {error}"))
+            errors.append(
+                issue("plugin_source_rules_invalid", f"插件源码规则不可导入: {type(error).__name__}: {error}")
+            )
             records = []
             extracted_items = []
             translated_paths = set()
@@ -799,8 +878,7 @@ class RuleValidationAgentMixin:
                 "selector_count": sum(len(record.selectors) for record in records),
                 "excluded_selector_count": sum(len(record.excluded_selectors) for record in records),
                 "reviewed_selector_count": sum(
-                    len(record.selectors) + len(record.excluded_selectors)
-                    for record in records
+                    len(record.selectors) + len(record.excluded_selectors) for record in records
                 ),
                 "unreviewed_selector_count": unreviewed_count,
                 "hit_count": len(extracted_items),
@@ -822,8 +900,12 @@ class RuleValidationAgentMixin:
         """校验并导入当前游戏的插件源码文本规则。"""
         try:
             import_file = parse_plugin_source_rule_import_text(rules_text)
-            async with await self.game_registry.open_game(game_title) as session:
-                setting = load_setting(self.setting_path, source_language=session.source_language)
+            async with await open_game_for_mutation(self.game_registry, game_title) as session:
+                setting = load_setting(
+                    self.setting_path,
+                    source_language=session.source_language,
+                    additional_source_languages=session.additional_source_languages,
+                )
                 custom_rules = await self._resolve_custom_rules(
                     session=session,
                     custom_placeholder_rules_text=None,
@@ -835,19 +917,26 @@ class RuleValidationAgentMixin:
                     structured_placeholder_rules=structured_rules,
                 )
                 game_data = await self._load_translation_source_game_data(session)
-                scan = build_plugin_source_scan(game_data=game_data, text_rules=text_rules)
+                plugin_source_raw_index = build_plugin_source_raw_index(game_data=game_data)
+                scan = derive_plugin_source_scan(index=plugin_source_raw_index, text_rules=text_rules)
+                if scan.risk.read_error_file_count:
+                    return _plugin_source_rules_read_error_report(scan)
+                await session.replace_plugin_source_assessment(
+                    source_hash=plugin_source_rule_scope_hash(scan=scan),
+                    text_rules_hash=plugin_source_text_rules_hash(text_rules),
+                    high_risk=scan.risk.high_risk,
+                    candidate_count=len(scan.candidates),
+                    summary=scan.risk_report_json(),
+                )
                 records = build_plugin_source_rule_records_from_import(
-                    game_data=game_data,
                     import_file=import_file,
-                    text_rules=text_rules,
                     scan=scan,
                 )
                 old_records = await session.read_plugin_source_text_rules()
                 review = collect_plugin_source_review_coverage(scan=scan, rule_records=records)
                 unreviewed_count = len(review.unreviewed_candidates)
                 reviewed_selector_count = sum(
-                    len(record.selectors) + len(record.excluded_selectors)
-                    for record in records
+                    len(record.selectors) + len(record.excluded_selectors) for record in records
                 )
                 if unreviewed_count and (scan.risk.high_risk or records or old_records):
                     return AgentReport.from_parts(
@@ -912,9 +1001,11 @@ class RuleValidationAgentMixin:
                 else:
                     await session.replace_rule_review_state(
                         rule_domain=PLUGIN_SOURCE_TEXT_RULE_DOMAIN,
-                        scope_hash=plugin_source_rule_scope_hash(game_data),
+                        scope_hash=plugin_source_rule_scope_hash(scan=scan),
                         reviewed_empty=True,
                     )
+        except RecoveryRequiredError:
+            raise
         except Exception as error:
             return AgentReport.from_parts(
                 errors=[issue("plugin_source_rules_invalid", f"插件源码规则不可导入: {type(error).__name__}: {error}")],
@@ -932,7 +1023,9 @@ class RuleValidationAgentMixin:
             )
         warnings = [] if records else [issue("plugin_source_rules_empty", "已导入空插件源码规则")]
         if unreviewed_count:
-            warnings.append(issue("plugin_source_review_incomplete", f"插件源码规则还有 {unreviewed_count} 个候选未归入翻译或排除"))
+            warnings.append(
+                issue("plugin_source_review_incomplete", f"插件源码规则还有 {unreviewed_count} 个候选未归入翻译或排除")
+            )
         if deleted_translation_items > 0 and deleted_translation_backup_path is not None:
             warnings.append(
                 issue(
@@ -948,8 +1041,7 @@ class RuleValidationAgentMixin:
                 "selector_count": sum(len(record.selectors) for record in records),
                 "excluded_selector_count": sum(len(record.excluded_selectors) for record in records),
                 "reviewed_selector_count": sum(
-                    len(record.selectors) + len(record.excluded_selectors)
-                    for record in records
+                    len(record.selectors) + len(record.excluded_selectors) for record in records
                 ),
                 "unreviewed_selector_count": unreviewed_count,
                 "deleted_translation_items": deleted_translation_items,
@@ -960,7 +1052,9 @@ class RuleValidationAgentMixin:
             },
         )
 
-    async def validate_event_command_rules(self: AgentServiceContext, *, game_title: str, rules_text: str) -> AgentReport:
+    async def validate_event_command_rules(
+        self: AgentServiceContext, *, game_title: str, rules_text: str
+    ) -> AgentReport:
         """校验事件指令规则 JSON 文本并报告命中情况。"""
         errors: list[AgentIssue] = []
         warnings: list[AgentIssue] = []
@@ -968,7 +1062,11 @@ class RuleValidationAgentMixin:
         try:
             import_file = parse_event_command_rule_import_text(rules_text)
             async with await self.game_registry.open_game(game_title) as session:
-                setting = load_setting(self.setting_path, source_language=session.source_language)
+                setting = load_setting(
+                    self.setting_path,
+                    source_language=session.source_language,
+                    additional_source_languages=session.additional_source_languages,
+                )
                 custom_rules = await self._resolve_custom_rules(
                     session=session,
                     custom_placeholder_rules_text=None,
@@ -976,7 +1074,12 @@ class RuleValidationAgentMixin:
                 structured_rules = await self._resolve_structured_rules(session=session)
                 game_data = await self._load_translation_source_game_data(session)
                 translated_paths: set[str] = await session.read_translation_location_paths()
-            records = build_event_command_rule_records_from_import(game_data=game_data, import_file=import_file)
+            command_index = build_event_command_analysis_index(game_data)
+            records = build_event_command_rule_records_from_import(
+                game_data=game_data,
+                import_file=import_file,
+                command_index=command_index,
+            )
             text_rules = TextRules.from_setting(
                 setting.text_rules,
                 custom_placeholder_rules=custom_rules,
@@ -986,11 +1089,9 @@ class RuleValidationAgentMixin:
                 game_data,
                 rule_records=records,
                 text_rules=text_rules,
-            ).extract_all_text()
+            ).extract_all_text_from_index(command_index)
             extracted_items = [
-                item
-                for translation_data in extracted_map.values()
-                for item in translation_data.translation_items
+                item for translation_data in extracted_map.values() for item in translation_data.translation_items
             ]
             unwritable_items = _collect_write_protocol_unwritable_items(
                 game_data=game_data,
@@ -1019,7 +1120,9 @@ class RuleValidationAgentMixin:
                     "reason": f"{type(error).__name__}: {error}",
                 }
             if unwritable_items:
-                errors.append(issue("event_command_rules_unwritable", f"事件指令规则存在 {len(unwritable_items)} 个不可写命中项"))
+                errors.append(
+                    issue("event_command_rules_unwritable", f"事件指令规则存在 {len(unwritable_items)} 个不可写命中项")
+                )
             unwritable_items_by_path = _json_items_by_location_path(unwritable_items)
             rule_details: JsonArray = []
             for record in records:
@@ -1027,7 +1130,7 @@ class RuleValidationAgentMixin:
                     game_data,
                     rule_records=[record],
                     text_rules=text_rules,
-                ).extract_all_text()
+                ).extract_all_text_from_index(command_index)
                 record_items = [
                     item
                     for translation_data in record_extracted_map.values()
@@ -1052,7 +1155,9 @@ class RuleValidationAgentMixin:
             if records and not extracted_items:
                 warnings.append(issue("event_command_rules_no_hits", "事件指令规则没有提取到任何可翻译文本"))
         except Exception as error:
-            errors.append(issue("event_command_rules_invalid", f"事件指令规则不可导入: {type(error).__name__}: {error}"))
+            errors.append(
+                issue("event_command_rules_invalid", f"事件指令规则不可导入: {type(error).__name__}: {error}")
+            )
             records = []
             extracted_items = []
             translated_paths = set()
@@ -1079,6 +1184,49 @@ def _summary_int_from_payload(payload: JsonObject, key: str) -> int:
     if isinstance(raw_value, bool) or not isinstance(raw_value, int):
         raise RuntimeError(f"MV 虚拟名字框候选导出缺少有效计数字段: {key}")
     return raw_value
+
+
+def _plugin_source_rules_read_error_report(scan: PluginSourceScan) -> AgentReport:
+    """启用插件源码读取不完整时拒绝校验或导入规则。"""
+    read_error_count = scan.risk.read_error_file_count
+    failure_summary = _plugin_source_unavailable_file_summary(scan)
+    return AgentReport.from_parts(
+        errors=[
+            issue(
+                "plugin_source_read_error",
+                f"有 {read_error_count} 个已启用插件的翻译源源码不可用（{failure_summary}），"
+                + "无法可信校验或导入插件源码规则",
+            )
+        ],
+        warnings=[],
+        summary={
+            "file_count": 0,
+            "selector_count": 0,
+            "excluded_selector_count": 0,
+            "reviewed_selector_count": 0,
+            "unreviewed_selector_count": 0,
+            "hit_count": 0,
+            "extractable_count": 0,
+            "translated_count": 0,
+            "writable_count": 0,
+            "unwritable_count": 0,
+            "deleted_translation_items": 0,
+            "deleted_translation_backup_path": "",
+        },
+        details=scan.risk_report_json(),
+    )
+
+
+def _plugin_source_unavailable_file_summary(scan: PluginSourceScan) -> str:
+    """按三态扫描事实汇总缺失与读取失败数量。"""
+    return "、".join(
+        part
+        for part in (
+            f"缺失 {scan.missing_enabled_file_count} 个" if scan.missing_enabled_file_count else "",
+            f"读取失败 {scan.unreadable_enabled_file_count} 个" if scan.unreadable_enabled_file_count else "",
+        )
+        if part
+    )
 
 
 def _mv_namebox_match_key(detail: JsonValue) -> tuple[str, str] | None:

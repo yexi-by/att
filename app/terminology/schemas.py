@@ -4,7 +4,6 @@ from typing import ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-
 type TerminologyCategory = Literal[
     "speaker_names",
     "map_display_names",
@@ -208,14 +207,10 @@ def collect_terminology_bundle_errors(
 
     field_translations = _collect_filled_field_term_translations(registry)
     conflicting_field_terms = [
-        source_text
-        for source_text, translated_texts in field_translations.items()
-        if len(translated_texts) > 1
+        source_text for source_text, translated_texts in field_translations.items() if len(translated_texts) > 1
     ]
     if conflicting_field_terms:
-        errors.append(
-            f"字段译名表同一原文存在多个译名: {_format_term_samples(conflicting_field_terms)}"
-        )
+        errors.append(f"字段译名表同一原文存在多个译名: {_format_term_samples(conflicting_field_terms)}")
 
     mismatched_terms: list[str] = []
     for source_text, glossary_translation in glossary.terms.items():
@@ -225,9 +220,7 @@ def collect_terminology_bundle_errors(
         if glossary_translation not in translated_texts:
             mismatched_terms.append(source_text)
     if mismatched_terms:
-        errors.append(
-            f"正文术语表与字段译名表存在同名术语译名不一致: {_format_term_samples(mismatched_terms)}"
-        )
+        errors.append(f"正文术语表与字段译名表存在同名术语译名不一致: {_format_term_samples(mismatched_terms)}")
     return errors
 
 

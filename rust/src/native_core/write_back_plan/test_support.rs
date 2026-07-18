@@ -1761,66 +1761,10 @@ fn write_mv_data_origin_and_active(game_dir: &Path, file_name: &str, content: &s
 fn create_minimal_database(db_path: &Path) {
     let connection = Connection::open(db_path).expect("测试数据库应可创建");
     connection
-        .execute_batch(
-            "
-            CREATE TABLE translation_items (
-                location_path TEXT PRIMARY KEY,
-                item_type TEXT NOT NULL,
-                role TEXT,
-                original_lines TEXT NOT NULL,
-                source_line_paths TEXT NOT NULL,
-                translation_lines TEXT NOT NULL
-            );
-            CREATE TABLE translation_runs (
-                run_id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                total_extracted INTEGER NOT NULL,
-                pending_count INTEGER NOT NULL,
-                deduplicated_count INTEGER NOT NULL,
-                batch_count INTEGER NOT NULL,
-                success_count INTEGER NOT NULL,
-                quality_error_count INTEGER NOT NULL,
-                llm_failure_count INTEGER NOT NULL,
-                started_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                finished_at TEXT,
-                stop_reason TEXT NOT NULL,
-                last_error TEXT NOT NULL
-            );
-            CREATE TABLE translation_quality_errors (run_id TEXT NOT NULL);
-            CREATE TABLE llm_failures (run_id TEXT NOT NULL);
-            CREATE TABLE source_residual_rules (
-                rule_id TEXT PRIMARY KEY,
-                rule_type TEXT NOT NULL,
-                location_path TEXT NOT NULL,
-                pattern_text TEXT NOT NULL,
-                allowed_terms TEXT NOT NULL,
-                check_group TEXT NOT NULL,
-                reason TEXT NOT NULL
-            );
-            CREATE TABLE plugin_source_text_rules (
-                file_name TEXT NOT NULL,
-                file_hash TEXT NOT NULL,
-                selector TEXT NOT NULL,
-                selector_kind TEXT NOT NULL,
-                PRIMARY KEY (file_name, selector)
-            );
-            CREATE TABLE terminology_field_terms (
-                category TEXT NOT NULL,
-                source_text TEXT NOT NULL,
-                translated_text TEXT NOT NULL
-            );
-            CREATE TABLE mv_virtual_namebox_rules (
-                rule_order INTEGER NOT NULL,
-                rule_name TEXT NOT NULL,
-                pattern_text TEXT NOT NULL,
-                speaker_group TEXT NOT NULL,
-                body_group TEXT NOT NULL,
-                speaker_policy TEXT NOT NULL,
-                render_template TEXT NOT NULL
-            );
-            ",
-        )
+        .execute_batch(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../app/persistence/schema/current.sql"
+        )))
         .expect("测试数据库 schema 应可创建");
     connection
         .execute(
@@ -1840,9 +1784,9 @@ fn create_minimal_database(db_path: &Path) {
         .execute(
             "INSERT INTO translation_runs \
              (run_id, status, total_extracted, pending_count, deduplicated_count, batch_count, \
-              success_count, quality_error_count, llm_failure_count, started_at, updated_at, \
-              finished_at, stop_reason, last_error) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+              success_count, quality_error_count, llm_failure_count, physical_request_count, \
+              retry_request_count, started_at, updated_at, finished_at, stop_reason, last_error) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 "run_test",
                 "completed",
@@ -1851,6 +1795,8 @@ fn create_minimal_database(db_path: &Path) {
                 1,
                 1,
                 1,
+                0,
+                0,
                 0,
                 0,
                 "2026-01-01T00:00:00",

@@ -1,3 +1,5 @@
+<!-- 此文件由 scripts/generate_skill_protocol.py 生成；请修改 skills/att-mz-protocol 后重新生成。 -->
+
 # 插件源码文本支线任务
 
 本任务只处理 `<游戏目录>/js/plugins` 直接 `.js` 文件中的硬编码显示文本。它是罕见高风险支线，不替代插件参数规则、事件指令规则或 Note 标签规则。

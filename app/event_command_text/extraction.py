@@ -4,18 +4,18 @@ from app.event_command_text.importer import command_matches_filters
 from app.plugin_text.paths import (
     expand_rule_to_leaf_paths,
     jsonpath_to_event_command_location_path,
-    resolve_event_command_leaves,
 )
-from app.rmmz.commands import iter_all_commands
 from app.rmmz.schema import (
+    MAP_PATTERN,
     EventCommandTextRuleRecord,
     GameData,
-    MAP_PATTERN,
     TranslationData,
     TranslationItem,
 )
-from app.rmmz.text_rules import TextRules, get_default_text_rules
 from app.rmmz.text_protocol import normalize_visible_text_for_extraction
+from app.rmmz.text_rules import TextRules, get_default_text_rules
+
+from .index import EventCommandAnalysisEntry, build_event_command_analysis_index
 
 
 class EventCommandTextExtraction:
@@ -34,12 +34,22 @@ class EventCommandTextExtraction:
 
     def extract_all_text(self) -> dict[str, TranslationData]:
         """按数据库规则提取事件指令参数中的字符串叶子。"""
+        return self.extract_all_text_from_index(build_event_command_analysis_index(self.game_data))
+
+    def extract_all_text_from_index(
+        self,
+        command_index: tuple[EventCommandAnalysisEntry, ...],
+    ) -> dict[str, TranslationData]:
+        """从单命令共享索引提取事件指令参数文本。"""
         if not self.rule_records:
             return {}
 
         translation_data_map: dict[str, TranslationData] = {}
         seen_location_paths: set[str] = set()
-        for path, display_name, command in iter_all_commands(self.game_data):
+        for entry in command_index:
+            path = entry.location_path
+            display_name = entry.display_name
+            command = entry.command
             matched_rules = [
                 rule
                 for rule in self.rule_records
@@ -65,10 +75,8 @@ class EventCommandTextExtraction:
                 )
 
             command_location_path = "/".join(map(str, path))
-            resolved_leaves = resolve_event_command_leaves(command.parameters)
-            string_leaf_map = {
-                leaf.path: leaf.value for leaf in resolved_leaves if leaf.value_type == "string"
-            }
+            resolved_leaves = entry.resolved_leaves
+            string_leaf_map = {leaf.path: leaf.value for leaf in resolved_leaves if leaf.value_type == "string"}
             for rule in matched_rules:
                 for path_template in rule.path_templates:
                     matched_paths = expand_rule_to_leaf_paths(
@@ -97,11 +105,7 @@ class EventCommandTextExtraction:
                             )
                         )
 
-        return {
-            file_name: data
-            for file_name, data in translation_data_map.items()
-            if data.translation_items
-        }
+        return {file_name: data for file_name, data in translation_data_map.items() if data.translation_items}
 
 
 __all__: list[str] = ["EventCommandTextExtraction"]

@@ -1,42 +1,46 @@
 """CLI 机器可读 JSON 输出测试。"""
 
+import json
 from argparse import Namespace
 from dataclasses import dataclass
-import json
 from pathlib import Path
 from types import TracebackType
 from typing import cast
 
-from main import main
 import pytest
 from pytest import CaptureFixture, MonkeyPatch
 
 from app.agent_toolkit import AgentReport
-from app.cli import build_parser
-from app.cli import build_progress_reporter
-from app.cli import build_translate_summary_report
-from app.cli import ensure_text_translation_not_blocked
-from app.cli import parser_command_names
-from app.cli import registered_command_names
-from app.cli import write_report_outputs
-from app.cli.errors import CliArgumentError
-from app.cli.reports import build_sampled_stdout_report, build_write_back_summary_report
+from app.application.errors import WorkflowGateError
+from app.application.summaries import TerminologyWriteSummary, TextTranslationSummary, WriteBackSummary
+from app.cli import (
+    build_parser,
+    build_progress_reporter,
+    build_translate_summary_report,
+    ensure_text_translation_not_blocked,
+    parser_command_names,
+    registered_command_names,
+    write_report_outputs,
+)
+from app.cli.commands.registry import run_list_command
 from app.cli.commands.rules import (
     build_deleted_translation_backup_details,
     build_deleted_translation_warnings,
+    run_scan_structured_placeholder_candidates_command,
 )
-from app.cli.commands.registry import run_list_command
 from app.cli.commands.write_back import run_all_command
+from app.cli.errors import CliArgumentError
+from app.cli.reports import build_sampled_stdout_report, build_write_back_summary_report
 from app.cli.runtime import build_setting_overrides
-from app.application.errors import WorkflowGateError
-from app.application.summaries import TerminologyWriteSummary, TextTranslationSummary, WriteBackSummary
 from app.rmmz.json_types import coerce_json_value, ensure_json_array, ensure_json_object
+from main import main
 
 
 @dataclass(frozen=True)
 class FakeRegisteredGame:
     """供 CLI 注册列表测试使用的已注册游戏记录。"""
 
+    game_id: str
     game_title: str
     game_path: Path
     content_root: Path
@@ -44,6 +48,7 @@ class FakeRegisteredGame:
     engine_kind: str
     engine_version: str
     source_language: str
+    additional_source_languages: tuple[str, ...]
     target_language: str
 
 
@@ -67,8 +72,21 @@ def test_add_game_requires_explicit_source_language() -> None:
 
     assert namespace_optional_str(args, "source_language") == "ja"
 
+    mixed_args = parser.parse_args(
+        [
+            "add-game",
+            "--path",
+            "demo",
+            "--source-language",
+            "ja",
+            "--additional-source-language",
+            "en",
+        ]
+    )
+    assert getattr(mixed_args, "additional_source_language") == ["en"]
 
-def test_add_game_existing_source_snapshot_reports_business_error(
+
+def test_add_game_existing_source_snapshot_reports_registration_conflict(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
     capsys: CaptureFixture[str],
@@ -78,10 +96,17 @@ def test_add_game_existing_source_snapshot_reports_business_error(
     class FakeHandler:
         """模拟注册阶段发现目标目录已存在可信源快照。"""
 
-        async def add_game(self, game_path: Path, *, source_language: str) -> str:
+        async def add_game(
+            self,
+            game_path: Path,
+            *,
+            source_language: str,
+            additional_source_languages: tuple[str, ...] = (),
+        ) -> str:
             """抛出快照冲突错误。"""
             _ = game_path
             _ = source_language
+            _ = additional_source_languages
             raise FileExistsError("目标目录已存在可信源快照，请使用干净游戏目录")
 
     class FakeHandlerSession:
@@ -122,7 +147,7 @@ def test_add_game_existing_source_snapshot_reports_business_error(
 
     assert exit_code == 1
     assert payload["status"] == "error"
-    assert first_error["code"] == "business_error"
+    assert first_error["code"] == "game_registration_conflict"
     message = first_error["message"]
     assert isinstance(message, str)
     assert "可信源快照" in message
@@ -143,6 +168,7 @@ async def test_list_json_includes_engine_layout_metadata(
             """返回一条带完整引擎布局字段的注册记录。"""
             return [
                 FakeRegisteredGame(
+                    game_id="00000000-0000-0000-0000-000000000001",
                     game_title="示例游戏",
                     game_path=tmp_path / "game",
                     content_root=tmp_path / "game" / "www",
@@ -150,6 +176,7 @@ async def test_list_json_includes_engine_layout_metadata(
                     engine_kind="mv",
                     engine_version="1.6.1",
                     source_language="en",
+                    additional_source_languages=("ja",),
                     target_language="zh-Hans",
                 )
             ]
@@ -170,6 +197,7 @@ async def test_list_json_includes_engine_layout_metadata(
     assert first_game["engine_kind"] == "mv"
     assert first_game["engine_version"] == "1.6.1"
     assert first_game["source_language"] == "en"
+    assert first_game["additional_source_languages"] == ["ja"]
     assert first_game["target_language"] == "zh-Hans"
     assert first_game["content_root"] == str(tmp_path / "game" / "www")
     assert first_game["game_path"] == str(tmp_path / "game")
@@ -210,7 +238,7 @@ def test_json_command_reports_unexpected_error_as_parseable_json(
     assert "CLI 运行开始" not in captured.out
 
 
-def test_json_import_command_reports_business_error_as_parseable_json(
+def test_json_import_command_reports_structured_error_as_parseable_json(
     tmp_path: Path,
     capsys: CaptureFixture[str],
 ) -> None:
@@ -242,7 +270,7 @@ def test_json_import_command_reports_business_error_as_parseable_json(
     assert "CLI 运行开始" not in captured.out
 
 
-def test_json_command_reports_application_gate_error_as_business_error(
+def test_json_command_reports_application_gate_error_as_structured_error(
     monkeypatch: MonkeyPatch,
     capsys: CaptureFixture[str],
 ) -> None:
@@ -264,7 +292,7 @@ def test_json_command_reports_application_gate_error_as_business_error(
     first_error = ensure_json_object(errors[0], "CLI JSON errors[0]")
 
     assert exit_code == 1
-    assert first_error["code"] == "business_error"
+    assert first_error["code"] == "workflow_blocked"
     message = first_error["message"]
     assert isinstance(message, str)
     assert "插件规则为空" in message
@@ -1336,6 +1364,62 @@ def test_validation_report_output_writes_full_file_and_prints_summary(
     assert stdout_matches["omitted_count"] == 5
     assert first_sample_matches["count"] == 3
     assert len(output_matches) == 25
+
+
+@pytest.mark.asyncio
+async def test_structured_placeholder_scan_cli_writes_all_candidates_and_samples_stdout(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    """结构化候选命令的 `--output` 保留全部明细，stdout 仍只展示前 20 条。"""
+    rules_path = tmp_path / "structured-rules.json"
+    output_path = tmp_path / "structured-scan.json"
+    _ = rules_path.write_text('{"paired_shell_rules": []}', encoding="utf-8")
+    report = AgentReport(
+        status="ok",
+        summary={"candidate_count": 125, "covered_count": 0, "uncovered_count": 125},
+        details={"candidates": [{"index": index} for index in range(125)]},
+    )
+
+    async def fake_resolve_target_game_title(args: Namespace) -> str:
+        _ = args
+        return "demo"
+
+    async def fake_scan(
+        self: object,
+        *,
+        game_title: str,
+        rules_text: str,
+    ) -> AgentReport:
+        _ = self
+        assert game_title == "demo"
+        assert rules_text == '{"paired_shell_rules": []}'
+        return report
+
+    monkeypatch.setattr("app.cli.commands.rules.resolve_target_game_title", fake_resolve_target_game_title)
+    monkeypatch.setattr("app.cli.commands.rules.AgentToolkitService.scan_structured_placeholder_candidates", fake_scan)
+    args = Namespace(game="demo", input=str(rules_path), output=str(output_path))
+
+    exit_code = await run_scan_structured_placeholder_candidates_command(args)
+
+    stdout_payload = ensure_json_object(
+        coerce_json_value(cast(object, json.loads(capsys.readouterr().out))),
+        "stdout JSON",
+    )
+    output_payload = ensure_json_object(
+        coerce_json_value(cast(object, json.loads(output_path.read_text(encoding="utf-8")))),
+        "output JSON",
+    )
+    stdout_details = ensure_json_object(stdout_payload["details"], "stdout details")
+    stdout_candidates = ensure_json_object(stdout_details["candidates"], "stdout candidates")
+    output_details = ensure_json_object(output_payload["details"], "output details")
+    output_candidates = ensure_json_array(output_details["candidates"], "output candidates")
+    assert exit_code == 0
+    assert stdout_candidates["count"] == 125
+    assert len(ensure_json_array(stdout_candidates["samples"], "stdout samples")) == 20
+    assert stdout_candidates["omitted_count"] == 105
+    assert len(output_candidates) == 125
 
 
 def test_placeholder_rule_build_report_can_leave_rule_file_untouched(

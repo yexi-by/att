@@ -84,6 +84,7 @@ pub(crate) fn compile_rules(rules: NativeTextRules) -> Result<CompiledRules, Str
         })?;
         custom_placeholder_rules.push(CompiledCustomRule {
             pattern,
+            pattern_text: rule.pattern_text,
             placeholder_template: rule.placeholder_template,
         });
     }

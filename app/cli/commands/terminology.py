@@ -10,8 +10,9 @@ import argparse
 from app.agent_toolkit import AgentReport
 from app.agent_toolkit.reports import issue
 from app.cli.arguments import read_required_path_arg
-from app.cli.runtime import HandlerSession, resolve_target_game_title
 from app.cli.reports import write_report_outputs
+from app.cli.runtime import HandlerSession, resolve_target_game_title
+from app.persistence import RecoveryRequiredError
 
 
 async def run_export_terminology_command(args: argparse.Namespace) -> int:
@@ -55,6 +56,8 @@ async def run_import_terminology_command(args: argparse.Namespace) -> int:
                 input_path=input_path,
                 glossary_input_path=glossary_input_path,
             )
+    except RecoveryRequiredError:
+        raise
     except Exception as error:
         report = AgentReport.from_parts(
             errors=[issue("terminology_invalid", f"术语表导入失败: {type(error).__name__}: {error}")],

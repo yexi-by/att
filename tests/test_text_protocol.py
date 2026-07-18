@@ -5,7 +5,6 @@ from typing import cast
 
 import pytest
 
-from app.rmmz.text_rules import JsonValue, coerce_json_value
 from app.rmmz.text_protocol import (
     decode_json_container_text,
     decode_visible_text,
@@ -14,6 +13,7 @@ from app.rmmz.text_protocol import (
     normalize_visible_text_for_extraction,
     validate_encoded_text,
 )
+from app.rmmz.text_rules import JsonValue, coerce_json_value
 
 
 def test_coerce_json_value_validates_without_copying_containers() -> None:
@@ -58,10 +58,13 @@ def test_visible_text_decodes_and_reencodes_json_string_shell() -> None:
 
     assert visible_text == r"\C[2]目標\n本文\C[0]"
     assert json.loads(written_text) == r"\C[2]目标\n正文\C[0]"
-    assert validate_encoded_text(
-        original_raw_text=raw_text,
-        written_raw_text=written_text,
-    ) == []
+    assert (
+        validate_encoded_text(
+            original_raw_text=raw_text,
+            written_raw_text=written_text,
+        )
+        == []
+    )
 
 
 def test_extraction_text_strips_json_shell_inner_boundary_whitespace() -> None:

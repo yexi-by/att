@@ -1,125 +1,6 @@
-//! 字体引用替换扫描。
-//!
-//! 本模块负责在游戏数据和插件参数中并行查找可替换字体引用并生成变更清单。
+//! 写回计划内部的字体引用转换。
 
-use rayon::prelude::*;
 use serde_json::{Map, Value};
-
-use super::models::{FontReplacementChange, FontReplacementOutput, FontReplacementPayload};
-use super::pool::run_with_optional_pool;
-
-pub fn scan_font_replacements_impl(payload_json: &str) -> Result<String, String> {
-    let payload: FontReplacementPayload = serde_json::from_str(payload_json)
-        .map_err(|error| format!("Rust 字体替换输入 JSON 解析失败: {error}"))?;
-    let output = run_with_optional_pool(|| {
-        let mut data_changes: Vec<FontReplacementChange> = payload
-            .data
-            .par_iter()
-            .filter(|(file_name, value)| file_name.as_str() != "plugins.js" && !value.is_string())
-            .flat_map(|(file_name, value)| {
-                let mut changes = Vec::new();
-                collect_font_replacements_in_value(
-                    file_name,
-                    value,
-                    "",
-                    &payload.old_font_names,
-                    &payload.replacement_font_name,
-                    &mut changes,
-                );
-                changes
-            })
-            .collect();
-        data_changes.sort_by(|left, right| {
-            (left.file_name.as_str(), left.value_path.as_str())
-                .cmp(&(right.file_name.as_str(), right.value_path.as_str()))
-        });
-
-        let mut plugin_changes: Vec<FontReplacementChange> = payload
-            .plugins
-            .par_iter()
-            .enumerate()
-            .flat_map(|(index, value)| {
-                let mut changes = Vec::new();
-                collect_font_replacements_in_value(
-                    "plugins.js",
-                    value,
-                    &format!("/{index}"),
-                    &payload.old_font_names,
-                    &payload.replacement_font_name,
-                    &mut changes,
-                );
-                changes
-            })
-            .collect();
-        plugin_changes.sort_by(|left, right| left.value_path.cmp(&right.value_path));
-
-        let replaced_count = data_changes
-            .iter()
-            .chain(plugin_changes.iter())
-            .map(|change| change.count)
-            .sum();
-        FontReplacementOutput {
-            data_changes,
-            plugin_changes,
-            replaced_count,
-        }
-    })?;
-    serde_json::to_string(&output)
-        .map_err(|error| format!("Rust 字体替换输出 JSON 序列化失败: {error}"))
-}
-
-pub(crate) fn collect_font_replacements_in_value(
-    file_name: &str,
-    value: &Value,
-    value_path: &str,
-    old_font_names: &[String],
-    replacement_font_name: &str,
-    changes: &mut Vec<FontReplacementChange>,
-) {
-    if let Some(text) = value.as_str() {
-        if let Some((replaced_text, count)) =
-            replace_font_names_in_text(text, old_font_names, replacement_font_name)
-        {
-            changes.push(FontReplacementChange {
-                file_name: file_name.to_string(),
-                value_path: value_path.to_string(),
-                original_text: text.to_string(),
-                replaced_text,
-                count,
-            });
-        }
-        return;
-    }
-
-    if let Some(array) = value.as_array() {
-        for (index, child) in array.iter().enumerate() {
-            let child_path = append_json_pointer_part(value_path, &index.to_string());
-            collect_font_replacements_in_value(
-                file_name,
-                child,
-                &child_path,
-                old_font_names,
-                replacement_font_name,
-                changes,
-            );
-        }
-        return;
-    }
-
-    if let Some(object) = value.as_object() {
-        for (key, child) in object {
-            let child_path = append_json_pointer_part(value_path, key);
-            collect_font_replacements_in_value(
-                file_name,
-                child,
-                &child_path,
-                old_font_names,
-                replacement_font_name,
-                changes,
-            );
-        }
-    }
-}
 
 pub(crate) fn replace_font_names_in_text(
     text: &str,
@@ -272,4 +153,50 @@ pub(crate) fn append_json_pointer_part(value_path: &str, part: &str) -> String {
 
 pub(crate) fn escape_json_pointer_part(part: &str) -> String {
     part.replace('~', "~0").replace('/', "~1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_json_pointer_part, replace_font_names_in_text};
+
+    #[test]
+    fn write_plan_font_replacement_handles_direct_and_encoded_json_references() {
+        let old_font_names = [
+            "AnotherFont.woff".to_string(),
+            "OldFont.woff".to_string(),
+            "OldFont".to_string(),
+        ];
+
+        assert_eq!(
+            replace_font_names_in_text("fonts/OldFont", &old_font_names, "NotoSansSC-Regular.ttf",),
+            Some(("fonts/NotoSansSC-Regular.ttf".to_string(), 1)),
+        );
+        assert_eq!(
+            replace_font_names_in_text(
+                r#"{"font": "AnotherFont.woff", "text": "正文"}"#,
+                &old_font_names,
+                "NotoSansSC-Regular.ttf",
+            ),
+            Some((
+                r#"{"font": "NotoSansSC-Regular.ttf", "text": "正文"}"#.to_string(),
+                1,
+            )),
+        );
+        assert_eq!(
+            replace_font_names_in_text(
+                "请选择 OldFont 字体",
+                &old_font_names,
+                "NotoSansSC-Regular.ttf",
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn write_plan_font_replacement_escapes_json_pointer_parts() {
+        assert_eq!(
+            append_json_pointer_part("/parameters", "a~/b"),
+            "/parameters/a~0~1b"
+        );
+    }
 }

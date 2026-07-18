@@ -155,4 +155,5 @@ def build_progress_reporter(description: str) -> AgentProgressReporter:
     """创建固定的 Agent 文本进度回调适配器。"""
     return AgentProgressReporter(description)
 
+
 __all__ = ["AgentProgressReporter", "build_progress_reporter"]

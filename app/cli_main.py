@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import argparse
+import asyncio
 import json
 import sys
 import time
@@ -55,6 +55,7 @@ def _suppress_known_third_party_warnings() -> None:
 _configure_stdio_encoding()
 _suppress_known_third_party_warnings()
 
+from app.application.errors import ApplicationBusinessError  # noqa: E402
 from app.cli import (  # noqa: E402
     CliArgumentError,
     CliBusinessError,
@@ -63,8 +64,9 @@ from app.cli import (  # noqa: E402
     format_argv,
     format_namespace,
 )
-from app.application.errors import ApplicationBusinessError  # noqa: E402
+from app.diagnostics import command_diagnostics, current_diagnostic_snapshot, diagnostic_stage  # noqa: E402
 from app.observability import logger, resolve_log_file_path, setup_logger  # noqa: E402
+from app.persistence.errors import PersistenceBusinessError  # noqa: E402
 
 
 def format_exception_summary(error: BaseException) -> str:
@@ -106,16 +108,22 @@ def raw_flag_enabled(argv: Sequence[str], flag: str) -> bool:
     return flag in argv
 
 
-def print_json_error(*, code: str, message: str, detail: str = "") -> None:
+def print_json_error(
+    *,
+    code: str,
+    message: str,
+    details: dict[str, object] | None = None,
+    detail: str = "",
+) -> None:
     """向 stdout 输出统一结构的 JSON 错误报告。
 
     CLI 必须保证 stdout 可被外部 Agent 直接解析。命令执行过程中
     即使出现业务错误或未知异常，也要返回和正常报告相同的外层结构。
     """
-    details: dict[str, str] = {}
+    payload_details = dict(details or {})
     if detail:
-        details["detail"] = detail
-    payload = {
+        payload_details["detail"] = detail
+    payload: dict[str, object] = {
         "status": "error",
         "errors": [
             {
@@ -125,8 +133,11 @@ def print_json_error(*, code: str, message: str, detail: str = "") -> None:
         ],
         "warnings": [],
         "summary": {},
-        "details": details,
+        "details": payload_details,
     }
+    diagnostic_snapshot = current_diagnostic_snapshot()
+    if diagnostic_snapshot is not None:
+        payload["diagnostics"] = diagnostic_snapshot.to_json_object()
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -141,8 +152,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         进程退出码。
     """
     raw_argv = tuple(argv) if argv is not None else tuple(sys.argv[1:])
+    with command_diagnostics(enabled=raw_flag_enabled(raw_argv, "--debug")):
+        return _run_command(raw_argv)
+
+
+def _run_command(raw_argv: tuple[str, ...]) -> int:
+    """在已建立的单命令诊断作用域中解析并执行命令。"""
     try:
-        args = build_parser().parse_args(raw_argv)
+        with diagnostic_stage("argument_parsing"):
+            args = build_parser().parse_args(raw_argv)
     except CliArgumentError as error:
         error_message = str(error)
         setup_logger(
@@ -160,27 +178,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     started_at = time.perf_counter()
     exit_code = 0
     status = "成功"
-    logger.info("\n".join((
-        "[tag.phase]CLI 运行开始[/tag.phase]",
-        f"命令参数: [tag.count]{format_argv(raw_argv)}[/tag.count]",
-        f"解析参数: [tag.count]{format_namespace(args)}[/tag.count]",
-        f"工作目录: [tag.path]{Path.cwd()}[/tag.path]",
-        f"日志文件: [tag.path]{log_file_path}[/tag.path]",
-    )))
+    logger.info(
+        "\n".join(
+            (
+                "[tag.phase]CLI 运行开始[/tag.phase]",
+                f"命令参数: [tag.count]{format_argv(raw_argv)}[/tag.count]",
+                f"解析参数: [tag.count]{format_namespace(args)}[/tag.count]",
+                f"工作目录: [tag.path]{Path.cwd()}[/tag.path]",
+                f"日志文件: [tag.path]{log_file_path}[/tag.path]",
+            )
+        )
+    )
 
     try:
-        exit_code = asyncio.run(dispatch_command(args))
+        with diagnostic_stage("command"):
+            exit_code = asyncio.run(dispatch_command(args))
         if exit_code != 0:
             status = "失败"
     except CliBusinessError as error:
         exit_code = 1
         status = "失败"
-        print_json_error(code="business_error", message=str(error))
+        print_json_error(code=error.code, message=str(error), details=error.details)
         logger.error(f"[tag.failure]命令执行失败[/tag.failure]：{error}")
     except ApplicationBusinessError as error:
         exit_code = 1
         status = "失败"
-        print_json_error(code="business_error", message=str(error))
+        print_json_error(code=error.code, message=str(error), details=error.details)
+        logger.error(f"[tag.failure]命令执行失败[/tag.failure]：{error}")
+    except PersistenceBusinessError as error:
+        exit_code = 1
+        status = "失败"
+        print_json_error(code=error.code, message=str(error), details=error.details)
         logger.error(f"[tag.failure]命令执行失败[/tag.failure]：{error}")
     except KeyboardInterrupt:
         exit_code = 130
@@ -196,13 +224,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             message=summary,
             detail=f"完整 traceback 已写入 {log_file_path}",
         )
-        logger.error(f"[tag.exception]未知异常[/tag.exception]：{summary}，完整 traceback 已写入 [tag.path]{log_file_path}[/tag.path]")
-        logger.bind(file_only=True).exception(
-            f"[tag.exception]命令执行失败完整异常[/tag.exception]：{summary}"
+        logger.error(
+            f"[tag.exception]未知异常[/tag.exception]：{summary}，完整 traceback 已写入 [tag.path]{log_file_path}[/tag.path]"
         )
+        logger.bind(file_only=True).exception(f"[tag.exception]命令执行失败完整异常[/tag.exception]：{summary}")
     finally:
         duration = time.perf_counter() - started_at
-        logger.info(f"[tag.phase]CLI 运行结束[/tag.phase] 状态 [tag.count]{status}[/tag.count] 退出码 [tag.count]{exit_code}[/tag.count] 耗时 [tag.count]{duration:.2f}[/tag.count] 秒")
+        logger.info(
+            f"[tag.phase]CLI 运行结束[/tag.phase] 状态 [tag.count]{status}[/tag.count] 退出码 [tag.count]{exit_code}[/tag.count] 耗时 [tag.count]{duration:.2f}[/tag.count] 秒"
+        )
 
     return exit_code
 

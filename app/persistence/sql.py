@@ -1,5 +1,7 @@
 """多游戏数据库管理器使用的 SQL 语句模块。"""
 
+from .schema_loader import load_current_schema_table_names
+
 TRANSLATION_TABLE_NAME = "translation_items"
 METADATA_TABLE_NAME = "metadata"
 LANGUAGE_SETTINGS_TABLE_NAME = "language_settings"
@@ -8,6 +10,7 @@ PLUGIN_TEXT_RULES_TABLE_NAME = "plugin_text_rules"
 PLUGIN_SOURCE_TEXT_RULES_TABLE_NAME = "plugin_source_text_rules"
 PLUGIN_SOURCE_RUNTIME_WRITE_MAP_TABLE_NAME = "plugin_source_runtime_write_map"
 PLUGIN_SOURCE_RUNTIME_SCAN_CACHE_TABLE_NAME = "plugin_source_runtime_scan_cache"
+PLUGIN_SOURCE_ASSESSMENTS_TABLE_NAME = "plugin_source_assessments"
 SOURCE_SNAPSHOT_FILES_TABLE_NAME = "source_snapshot_files"
 NOTE_TAG_TEXT_RULES_TABLE_NAME = "note_tag_text_rules"
 EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE_NAME = "event_command_text_rule_groups"
@@ -26,386 +29,49 @@ FONT_REPLACEMENT_RECORDS_TABLE_NAME = "font_replacement_records"
 TRANSLATION_RUNS_TABLE_NAME = "translation_runs"
 LLM_FAILURES_TABLE_NAME = "llm_failures"
 TRANSLATION_QUALITY_ERRORS_TABLE_NAME = "translation_quality_errors"
+WRITE_TRANSACTIONS_TABLE_NAME = "write_transactions"
 METADATA_KEY = "current_game"
 LANGUAGE_SETTINGS_KEY = "current"
 SCHEMA_VERSION_KEY = "current"
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
 TERMINOLOGY_BUNDLE_STATE_KEY = "current"
-EXPECTED_STATIC_TABLE_NAMES: tuple[str, ...] = (
-    SCHEMA_VERSION_TABLE_NAME,
-    TRANSLATION_TABLE_NAME,
-    METADATA_TABLE_NAME,
-    LANGUAGE_SETTINGS_TABLE_NAME,
-    PLUGIN_TEXT_RULES_TABLE_NAME,
-    PLUGIN_SOURCE_TEXT_RULES_TABLE_NAME,
-    PLUGIN_SOURCE_RUNTIME_WRITE_MAP_TABLE_NAME,
-    PLUGIN_SOURCE_RUNTIME_SCAN_CACHE_TABLE_NAME,
-    SOURCE_SNAPSHOT_FILES_TABLE_NAME,
-    NOTE_TAG_TEXT_RULES_TABLE_NAME,
-    EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE_NAME,
-    EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE_NAME,
-    EVENT_COMMAND_TEXT_RULE_PATHS_TABLE_NAME,
-    FIELD_TRANSLATION_TERMS_TABLE_NAME,
-    TEXT_GLOSSARY_TERMS_TABLE_NAME,
-    TERMINOLOGY_BUNDLE_STATE_TABLE_NAME,
-    PLACEHOLDER_RULES_TABLE_NAME,
-    STRUCTURED_PLACEHOLDER_RULES_TABLE_NAME,
-    STRUCTURED_PLACEHOLDER_RULE_GROUPS_TABLE_NAME,
-    SOURCE_RESIDUAL_RULES_TABLE_NAME,
-    MV_VIRTUAL_NAMEBOX_RULES_TABLE_NAME,
-    RULE_REVIEW_STATES_TABLE_NAME,
-    FONT_REPLACEMENT_RECORDS_TABLE_NAME,
-    TRANSLATION_RUNS_TABLE_NAME,
-    LLM_FAILURES_TABLE_NAME,
-    TRANSLATION_QUALITY_ERRORS_TABLE_NAME,
-)
-
-CREATE_SCHEMA_VERSION_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{SCHEMA_VERSION_TABLE_NAME}] (
-        schema_key TEXT PRIMARY KEY,
-        version    INTEGER NOT NULL
-    )
-;
-"""
-
-CREATE_TRANSLATION_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{TRANSLATION_TABLE_NAME}] (
-        location_path      TEXT PRIMARY KEY,
-        item_type          TEXT NOT NULL,
-        role               TEXT,
-        original_lines     TEXT NOT NULL,
-        source_line_paths  TEXT NOT NULL,
-        translation_lines  TEXT NOT NULL
-    )
-;
-"""
-
-CREATE_PLACEHOLDER_RULES_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{PLACEHOLDER_RULES_TABLE_NAME}] (
-        pattern_text         TEXT PRIMARY KEY,
-        placeholder_template TEXT NOT NULL
-    )
-;
-"""
-
-CREATE_STRUCTURED_PLACEHOLDER_RULES_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{STRUCTURED_PLACEHOLDER_RULES_TABLE_NAME}] (
-        rule_name          TEXT PRIMARY KEY,
-        rule_type          TEXT NOT NULL,
-        pattern_text       TEXT NOT NULL,
-        translatable_group TEXT NOT NULL
-    )
-;
-"""
-
-CREATE_STRUCTURED_PLACEHOLDER_RULE_GROUPS_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{STRUCTURED_PLACEHOLDER_RULE_GROUPS_TABLE_NAME}] (
-        rule_name            TEXT NOT NULL,
-        group_name           TEXT NOT NULL,
-        placeholder_template TEXT NOT NULL,
-        PRIMARY KEY (rule_name, group_name),
-        FOREIGN KEY (rule_name) REFERENCES [{STRUCTURED_PLACEHOLDER_RULES_TABLE_NAME}](rule_name) ON DELETE CASCADE
-    )
-;
-"""
-
-CREATE_SOURCE_RESIDUAL_RULES_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{SOURCE_RESIDUAL_RULES_TABLE_NAME}] (
-        rule_id       TEXT PRIMARY KEY,
-        rule_type     TEXT NOT NULL,
-        location_path TEXT NOT NULL,
-        pattern_text  TEXT NOT NULL,
-        allowed_terms TEXT NOT NULL,
-        check_group   TEXT NOT NULL,
-        reason        TEXT NOT NULL
-    )
-;
-"""
-
-CREATE_MV_VIRTUAL_NAMEBOX_RULES_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{MV_VIRTUAL_NAMEBOX_RULES_TABLE_NAME}] (
-        rule_order      INTEGER NOT NULL,
-        rule_name       TEXT NOT NULL,
-        pattern_text    TEXT NOT NULL,
-        speaker_group   TEXT NOT NULL,
-        body_group      TEXT NOT NULL,
-        speaker_policy  TEXT NOT NULL,
-        render_template TEXT NOT NULL,
-        PRIMARY KEY (rule_order),
-        UNIQUE (rule_name)
-    )
-;
-"""
-
-CREATE_RULE_REVIEW_STATES_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{RULE_REVIEW_STATES_TABLE_NAME}] (
-        rule_domain    TEXT PRIMARY KEY,
-        scope_hash     TEXT NOT NULL,
-        reviewed_empty INTEGER NOT NULL,
-        updated_at     TEXT NOT NULL
-    )
-;
-"""
-
-CREATE_FONT_REPLACEMENT_RECORDS_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{FONT_REPLACEMENT_RECORDS_TABLE_NAME}] (
-        file_name             TEXT NOT NULL,
-        value_path            TEXT NOT NULL,
-        original_text         TEXT NOT NULL,
-        replaced_text         TEXT NOT NULL,
-        replacement_font_name TEXT NOT NULL,
-        PRIMARY KEY (file_name, value_path)
-    )
-;
-"""
-
-CREATE_TRANSLATION_RUNS_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{TRANSLATION_RUNS_TABLE_NAME}] (
-        run_id            TEXT PRIMARY KEY,
-        status            TEXT NOT NULL,
-        total_extracted   INTEGER NOT NULL,
-        pending_count     INTEGER NOT NULL,
-        deduplicated_count INTEGER NOT NULL,
-        batch_count       INTEGER NOT NULL,
-        success_count     INTEGER NOT NULL,
-        quality_error_count INTEGER NOT NULL,
-        llm_failure_count INTEGER NOT NULL,
-        started_at        TEXT NOT NULL,
-        updated_at        TEXT NOT NULL,
-        finished_at       TEXT,
-        stop_reason       TEXT NOT NULL,
-        last_error        TEXT NOT NULL
-    )
-;
-"""
-
-CREATE_LLM_FAILURES_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{LLM_FAILURES_TABLE_NAME}] (
-        failure_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_id          TEXT NOT NULL,
-        category        TEXT NOT NULL,
-        error_type      TEXT NOT NULL,
-        error_message   TEXT NOT NULL,
-        retryable       INTEGER NOT NULL,
-        attempt_count   INTEGER NOT NULL,
-        created_at      TEXT NOT NULL,
-        FOREIGN KEY (run_id) REFERENCES [{TRANSLATION_RUNS_TABLE_NAME}](run_id) ON DELETE CASCADE
-    )
-;
-"""
-
-CREATE_TRANSLATION_QUALITY_ERRORS_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{TRANSLATION_QUALITY_ERRORS_TABLE_NAME}] (
-        run_id           TEXT NOT NULL,
-        location_path    TEXT NOT NULL,
-        item_type        TEXT NOT NULL,
-        role             TEXT,
-        original_lines   TEXT NOT NULL,
-        translation_lines TEXT NOT NULL,
-        error_type       TEXT NOT NULL,
-        error_detail     TEXT NOT NULL,
-        model_response   TEXT NOT NULL,
-        PRIMARY KEY (run_id, location_path),
-        FOREIGN KEY (run_id) REFERENCES [{TRANSLATION_RUNS_TABLE_NAME}](run_id) ON DELETE CASCADE
-    )
-;
-"""
-
-CREATE_METADATA_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{METADATA_TABLE_NAME}] (
-        metadata_key TEXT PRIMARY KEY,
-        game_title   TEXT NOT NULL,
-        game_path    TEXT NOT NULL,
-        engine_kind  TEXT NOT NULL,
-        content_root TEXT NOT NULL,
-        engine_version TEXT NOT NULL
-    )
-;
-"""
-
-CREATE_LANGUAGE_SETTINGS_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{LANGUAGE_SETTINGS_TABLE_NAME}] (
-        settings_key    TEXT PRIMARY KEY,
-        source_language TEXT NOT NULL,
-        target_language TEXT NOT NULL
-    )
-;
-"""
-
-CREATE_PLUGIN_TEXT_RULES_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{PLUGIN_TEXT_RULES_TABLE_NAME}] (
-        plugin_index  INTEGER NOT NULL,
-        plugin_name   TEXT NOT NULL,
-        plugin_hash   TEXT NOT NULL,
-        path_template TEXT NOT NULL,
-        PRIMARY KEY (plugin_index, path_template)
-    )
-;
-"""
-
-CREATE_PLUGIN_SOURCE_TEXT_RULES_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{PLUGIN_SOURCE_TEXT_RULES_TABLE_NAME}] (
-        file_name TEXT NOT NULL,
-        file_hash TEXT NOT NULL,
-        selector  TEXT NOT NULL,
-        selector_kind TEXT NOT NULL CHECK (selector_kind IN ('translate', 'excluded')),
-        PRIMARY KEY (file_name, selector)
-    )
-;
-"""
-
-CREATE_PLUGIN_SOURCE_RUNTIME_WRITE_MAP_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{PLUGIN_SOURCE_RUNTIME_WRITE_MAP_TABLE_NAME}] (
-        location_path          TEXT PRIMARY KEY,
-        mapping_kind           TEXT NOT NULL CHECK (mapping_kind IN ('translated', 'excluded')),
-        source_file_name       TEXT NOT NULL,
-        source_selector        TEXT NOT NULL,
-        source_file_hash       TEXT NOT NULL,
-        source_text_hash       TEXT NOT NULL,
-        translation_lines_hash TEXT NOT NULL,
-        runtime_file_name      TEXT NOT NULL,
-        runtime_selector       TEXT NOT NULL,
-        runtime_file_hash      TEXT NOT NULL,
-        runtime_text_hash      TEXT NOT NULL,
-        runtime_line           INTEGER NOT NULL,
-        created_at             TEXT NOT NULL,
-        UNIQUE (runtime_file_name, runtime_selector)
-    )
-;
-"""
-
-CREATE_PLUGIN_SOURCE_RUNTIME_SCAN_CACHE_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{PLUGIN_SOURCE_RUNTIME_SCAN_CACHE_TABLE_NAME}] (
-        file_name    TEXT PRIMARY KEY,
-        file_hash    TEXT NOT NULL,
-        syntax_error TEXT NOT NULL,
-        literals_json TEXT NOT NULL,
-        created_at   TEXT NOT NULL
-    )
-;
-"""
-
-CREATE_SOURCE_SNAPSHOT_FILES_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{SOURCE_SNAPSHOT_FILES_TABLE_NAME}] (
-        relative_path TEXT PRIMARY KEY,
-        sha256        TEXT NOT NULL,
-        byte_size     INTEGER NOT NULL,
-        updated_at    TEXT NOT NULL
-    )
-;
-"""
-
-CREATE_NOTE_TAG_TEXT_RULES_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{NOTE_TAG_TEXT_RULES_TABLE_NAME}] (
-        file_name TEXT NOT NULL,
-        tag_name  TEXT NOT NULL,
-        PRIMARY KEY (file_name, tag_name)
-    )
-;
-"""
-
-CREATE_EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE_NAME}] (
-        group_key    TEXT PRIMARY KEY,
-        command_code INTEGER NOT NULL
-    )
-;
-"""
-
-CREATE_EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE_NAME}] (
-        group_key       TEXT NOT NULL,
-        parameter_index INTEGER NOT NULL,
-        parameter_value TEXT NOT NULL,
-        PRIMARY KEY (group_key, parameter_index),
-        FOREIGN KEY (group_key) REFERENCES [{EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE_NAME}](group_key) ON DELETE CASCADE
-    )
-;
-"""
-
-CREATE_EVENT_COMMAND_TEXT_RULE_PATHS_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{EVENT_COMMAND_TEXT_RULE_PATHS_TABLE_NAME}] (
-        group_key     TEXT NOT NULL,
-        path_template TEXT NOT NULL,
-        PRIMARY KEY (group_key, path_template),
-        FOREIGN KEY (group_key) REFERENCES [{EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE_NAME}](group_key) ON DELETE CASCADE
-    )
-;
-"""
-
-CREATE_FIELD_TRANSLATION_TERMS_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{FIELD_TRANSLATION_TERMS_TABLE_NAME}] (
-        category        TEXT NOT NULL,
-        source_text     TEXT NOT NULL,
-        translated_text TEXT NOT NULL,
-        PRIMARY KEY (category, source_text)
-    )
-;
-"""
-
-CREATE_TEXT_GLOSSARY_TERMS_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{TEXT_GLOSSARY_TERMS_TABLE_NAME}] (
-        source_text     TEXT PRIMARY KEY,
-        translated_text TEXT NOT NULL
-    )
-;
-"""
-
-CREATE_TERMINOLOGY_BUNDLE_STATE_TABLE = f"""
---sql
-    CREATE TABLE IF NOT EXISTS [{TERMINOLOGY_BUNDLE_STATE_TABLE_NAME}] (
-        state_key TEXT PRIMARY KEY,
-        imported  INTEGER NOT NULL
-    )
-;
-"""
+EXPECTED_STATIC_TABLE_NAMES: tuple[str, ...] = load_current_schema_table_names()
 
 INSERT_TRANSLATION = f"""
 --sql
     INSERT OR REPLACE INTO [{TRANSLATION_TABLE_NAME}]
-    (location_path, item_type, role, original_lines, source_line_paths, translation_lines)
-    VALUES (?, ?, ?, ?, ?, ?)
+    (
+        location_path,
+        item_type,
+        role,
+        original_lines,
+        source_line_paths,
+        translation_lines,
+        context_key_json,
+        context_key_hash,
+        source_fingerprint,
+        rule_fingerprint,
+        terminology_fingerprint,
+        language_fingerprint,
+        prompt_protocol_version
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ;
 """
 
 UPSERT_METADATA = f"""
 --sql
     INSERT OR REPLACE INTO [{METADATA_TABLE_NAME}]
-    (metadata_key, game_title, game_path, engine_kind, content_root, engine_version)
-    VALUES (?, ?, ?, ?, ?, ?)
+    (metadata_key, game_id, game_title, game_path, engine_kind, content_root, engine_version)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
 ;
 """
 
 UPSERT_LANGUAGE_SETTINGS = f"""
 --sql
     INSERT OR REPLACE INTO [{LANGUAGE_SETTINGS_TABLE_NAME}]
-    (settings_key, source_language, target_language)
-    VALUES (?, ?, ?)
+    (settings_key, source_language, additional_source_languages, target_language)
+    VALUES (?, ?, ?, ?)
 ;
 """
 
@@ -568,8 +234,57 @@ INSERT_MV_VIRTUAL_NAMEBOX_RULE = f"""
 UPSERT_RULE_REVIEW_STATE = f"""
 --sql
     INSERT OR REPLACE INTO [{RULE_REVIEW_STATES_TABLE_NAME}]
-    (rule_domain, scope_hash, reviewed_empty, updated_at)
-    VALUES (?, ?, ?, ?)
+    (rule_domain, scope_hash, scope_contract_version, scope_payload_json, reviewed_empty, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+;
+"""
+
+UPSERT_PLUGIN_SOURCE_ASSESSMENT = f"""
+--sql
+    INSERT OR REPLACE INTO [{PLUGIN_SOURCE_ASSESSMENTS_TABLE_NAME}]
+    (
+        assessment_key,
+        source_hash,
+        text_rules_hash,
+        scanner_version,
+        high_risk,
+        candidate_count,
+        summary_json,
+        updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+;
+"""
+
+INSERT_WRITE_TRANSACTION = f"""
+--sql
+    INSERT INTO [{WRITE_TRANSACTIONS_TABLE_NAME}]
+    (transaction_id, operation, game_path, state, journal_path, payload_json, created_at, updated_at, error)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+;
+"""
+
+UPDATE_WRITE_TRANSACTION_PREPARED = f"""
+--sql
+    UPDATE [{WRITE_TRANSACTIONS_TABLE_NAME}]
+    SET state = 'prepared', payload_json = ?, updated_at = ?, error = ''
+    WHERE transaction_id = ? AND state = 'preparing'
+;
+"""
+
+UPDATE_WRITE_TRANSACTION_COMMITTED = f"""
+--sql
+    UPDATE [{WRITE_TRANSACTIONS_TABLE_NAME}]
+    SET state = 'committed', payload_json = ?, updated_at = ?, error = ''
+    WHERE transaction_id = ? AND state = 'prepared'
+;
+"""
+
+UPDATE_WRITE_TRANSACTION_STATE = f"""
+--sql
+    UPDATE [{WRITE_TRANSACTIONS_TABLE_NAME}]
+    SET state = ?, updated_at = ?, error = ?
+    WHERE transaction_id = ?
 ;
 """
 
@@ -581,7 +296,7 @@ INSERT_FONT_REPLACEMENT_RECORD = f"""
 ;
 """
 
-UPSERT_TRANSLATION_RUN = f"""
+INSERT_TRANSLATION_RUN = f"""
 --sql
     INSERT INTO [{TRANSLATION_RUNS_TABLE_NAME}]
     (
@@ -594,27 +309,46 @@ UPSERT_TRANSLATION_RUN = f"""
         success_count,
         quality_error_count,
         llm_failure_count,
+        physical_request_count,
+        retry_request_count,
         started_at,
         updated_at,
         finished_at,
         stop_reason,
         last_error
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(run_id) DO UPDATE SET
-        status = excluded.status,
-        total_extracted = excluded.total_extracted,
-        pending_count = excluded.pending_count,
-        deduplicated_count = excluded.deduplicated_count,
-        batch_count = excluded.batch_count,
-        success_count = excluded.success_count,
-        quality_error_count = excluded.quality_error_count,
-        llm_failure_count = excluded.llm_failure_count,
-        started_at = excluded.started_at,
-        updated_at = excluded.updated_at,
-        finished_at = excluded.finished_at,
-        stop_reason = excluded.stop_reason,
-        last_error = excluded.last_error
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+;
+"""
+
+UPDATE_TRANSLATION_RUN_CAS = f"""
+--sql
+    UPDATE [{TRANSLATION_RUNS_TABLE_NAME}]
+    SET status = ?,
+        total_extracted = ?,
+        pending_count = ?,
+        deduplicated_count = ?,
+        batch_count = ?,
+        success_count = ?,
+        quality_error_count = ?,
+        llm_failure_count = ?,
+        physical_request_count = ?,
+        retry_request_count = ?,
+        started_at = ?,
+        updated_at = ?,
+        finished_at = ?,
+        stop_reason = ?,
+        last_error = ?
+    WHERE run_id = ? AND status = ? AND started_at = ?
+;
+"""
+
+SELECT_RUNNING_TRANSLATION_RUNS = f"""
+--sql
+    SELECT *
+    FROM [{TRANSLATION_RUNS_TABLE_NAME}]
+    WHERE status = 'running'
+    ORDER BY started_at, run_id
 ;
 """
 
@@ -623,6 +357,13 @@ INSERT_LLM_FAILURE = f"""
     INSERT INTO [{LLM_FAILURES_TABLE_NAME}]
     (run_id, category, error_type, error_message, retryable, attempt_count, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
+;
+"""
+
+DELETE_LLM_FAILURES_BY_RUN = f"""
+--sql
+    DELETE FROM [{LLM_FAILURES_TABLE_NAME}]
+    WHERE run_id = ?
 ;
 """
 
@@ -649,7 +390,10 @@ SELECT_TRANSLATION_PATHS = f"""
 
 SELECT_TRANSLATED_ITEMS = f"""
 --sql
-    SELECT location_path, item_type, role, original_lines, source_line_paths, translation_lines
+    SELECT
+        location_path, item_type, role, original_lines, source_line_paths, translation_lines,
+        context_key_json, context_key_hash, source_fingerprint, rule_fingerprint,
+        terminology_fingerprint, language_fingerprint, prompt_protocol_version
     FROM [{TRANSLATION_TABLE_NAME}]
     ORDER BY location_path
 ;
@@ -657,7 +401,10 @@ SELECT_TRANSLATED_ITEMS = f"""
 
 SELECT_TRANSLATED_ITEMS_BY_PREFIX = f"""
 --sql
-    SELECT location_path, item_type, role, original_lines, source_line_paths, translation_lines
+    SELECT
+        location_path, item_type, role, original_lines, source_line_paths, translation_lines,
+        context_key_json, context_key_hash, source_fingerprint, rule_fingerprint,
+        terminology_fingerprint, language_fingerprint, prompt_protocol_version
     FROM [{TRANSLATION_TABLE_NAME}]
     WHERE location_path LIKE ?
     ORDER BY location_path
@@ -666,7 +413,10 @@ SELECT_TRANSLATED_ITEMS_BY_PREFIX = f"""
 
 SELECT_TRANSLATED_ITEM_BY_PATH = f"""
 --sql
-    SELECT location_path, item_type, role, original_lines, source_line_paths, translation_lines
+    SELECT
+        location_path, item_type, role, original_lines, source_line_paths, translation_lines,
+        context_key_json, context_key_hash, source_fingerprint, rule_fingerprint,
+        terminology_fingerprint, language_fingerprint, prompt_protocol_version
     FROM [{TRANSLATION_TABLE_NAME}]
     WHERE location_path = ?
     LIMIT 1
@@ -675,7 +425,7 @@ SELECT_TRANSLATED_ITEM_BY_PATH = f"""
 
 SELECT_METADATA = f"""
 --sql
-    SELECT game_title, game_path, engine_kind, content_root, engine_version
+    SELECT game_id, game_title, game_path, engine_kind, content_root, engine_version
     FROM [{METADATA_TABLE_NAME}]
     WHERE metadata_key = ?
     LIMIT 1
@@ -684,7 +434,7 @@ SELECT_METADATA = f"""
 
 SELECT_LANGUAGE_SETTINGS = f"""
 --sql
-    SELECT source_language, target_language
+    SELECT source_language, additional_source_languages, target_language
     FROM [{LANGUAGE_SETTINGS_TABLE_NAME}]
     WHERE settings_key = ?
     LIMIT 1
@@ -852,9 +602,45 @@ SELECT_MV_VIRTUAL_NAMEBOX_RULES = f"""
 
 SELECT_RULE_REVIEW_STATE = f"""
 --sql
-    SELECT rule_domain, scope_hash, reviewed_empty, updated_at
+    SELECT rule_domain, scope_hash, scope_contract_version, scope_payload_json, reviewed_empty, updated_at
     FROM [{RULE_REVIEW_STATES_TABLE_NAME}]
     WHERE rule_domain = ?
+    LIMIT 1
+;
+"""
+
+SELECT_PLUGIN_SOURCE_ASSESSMENT = f"""
+--sql
+    SELECT
+        assessment_key,
+        source_hash,
+        text_rules_hash,
+        scanner_version,
+        high_risk,
+        candidate_count,
+        summary_json,
+        updated_at
+    FROM [{PLUGIN_SOURCE_ASSESSMENTS_TABLE_NAME}]
+    WHERE assessment_key = ?
+    LIMIT 1
+;
+"""
+
+SELECT_WRITE_TRANSACTION = f"""
+--sql
+    SELECT *
+    FROM [{WRITE_TRANSACTIONS_TABLE_NAME}]
+    WHERE transaction_id = ?
+    LIMIT 1
+;
+"""
+
+SELECT_UNFINISHED_WRITE_TRANSACTION = f"""
+--sql
+    SELECT *
+    FROM [{WRITE_TRANSACTIONS_TABLE_NAME}]
+    WHERE state IN ('preparing', 'prepared', 'committed', 'recovery_required')
+    ORDER BY created_at, transaction_id
     LIMIT 1
 ;
 """
@@ -1016,6 +802,13 @@ DELETE_RULE_REVIEW_STATE = f"""
 ;
 """
 
+DELETE_PLUGIN_SOURCE_ASSESSMENT = f"""
+--sql
+    DELETE FROM [{PLUGIN_SOURCE_ASSESSMENTS_TABLE_NAME}]
+    WHERE assessment_key = ?
+;
+"""
+
 DELETE_ALL_FONT_REPLACEMENT_RECORDS = f"""
 --sql
     DELETE FROM [{FONT_REPLACEMENT_RECORDS_TABLE_NAME}]
@@ -1044,32 +837,6 @@ CHECK_CONNECTION_READABLE = """
 
 __all__: list[str] = [
     "CHECK_CONNECTION_READABLE",
-    "CREATE_SCHEMA_VERSION_TABLE",
-    "CREATE_EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE",
-    "CREATE_EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE",
-    "CREATE_EVENT_COMMAND_TEXT_RULE_PATHS_TABLE",
-    "CREATE_FONT_REPLACEMENT_RECORDS_TABLE",
-    "CREATE_LLM_FAILURES_TABLE",
-    "CREATE_SOURCE_RESIDUAL_RULES_TABLE",
-    "CREATE_LANGUAGE_SETTINGS_TABLE",
-    "CREATE_METADATA_TABLE",
-    "CREATE_MV_VIRTUAL_NAMEBOX_RULES_TABLE",
-    "CREATE_NOTE_TAG_TEXT_RULES_TABLE",
-    "CREATE_PLACEHOLDER_RULES_TABLE",
-    "CREATE_PLUGIN_TEXT_RULES_TABLE",
-    "CREATE_PLUGIN_SOURCE_TEXT_RULES_TABLE",
-    "CREATE_PLUGIN_SOURCE_RUNTIME_WRITE_MAP_TABLE",
-    "CREATE_PLUGIN_SOURCE_RUNTIME_SCAN_CACHE_TABLE",
-    "CREATE_SOURCE_SNAPSHOT_FILES_TABLE",
-    "CREATE_RULE_REVIEW_STATES_TABLE",
-    "CREATE_STRUCTURED_PLACEHOLDER_RULE_GROUPS_TABLE",
-    "CREATE_STRUCTURED_PLACEHOLDER_RULES_TABLE",
-    "CREATE_TRANSLATION_QUALITY_ERRORS_TABLE",
-    "CREATE_TRANSLATION_RUNS_TABLE",
-    "CREATE_TRANSLATION_TABLE",
-    "CREATE_TERMINOLOGY_BUNDLE_STATE_TABLE",
-    "CREATE_FIELD_TRANSLATION_TERMS_TABLE",
-    "CREATE_TEXT_GLOSSARY_TERMS_TABLE",
     "DELETE_ALL_PLACEHOLDER_RULES",
     "DELETE_ALL_STRUCTURED_PLACEHOLDER_RULE_GROUPS",
     "DELETE_ALL_STRUCTURED_PLACEHOLDER_RULES",
@@ -1086,9 +853,11 @@ __all__: list[str] = [
     "DELETE_ALL_PLUGIN_SOURCE_RUNTIME_SCAN_CACHE",
     "DELETE_ALL_SOURCE_SNAPSHOT_FILES",
     "DELETE_RULE_REVIEW_STATE",
+    "DELETE_PLUGIN_SOURCE_ASSESSMENT",
     "DELETE_ALL_FIELD_TRANSLATION_TERMS",
     "DELETE_ALL_TEXT_GLOSSARY_TERMS",
     "DELETE_ALL_TRANSLATION_QUALITY_ERRORS",
+    "DELETE_LLM_FAILURES_BY_RUN",
     "DELETE_TRANSLATION_ITEM_BY_PATH",
     "DELETE_TRANSLATION_ITEMS_BY_PREFIX",
     "EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE_NAME",
@@ -1115,6 +884,7 @@ __all__: list[str] = [
     "INSERT_PLUGIN_SOURCE_RUNTIME_SCAN_CACHE",
     "INSERT_SOURCE_SNAPSHOT_FILE",
     "INSERT_TRANSLATION_QUALITY_ERROR",
+    "INSERT_TRANSLATION_RUN",
     "INSERT_FIELD_TRANSLATION_TERM",
     "INSERT_TEXT_GLOSSARY_TERM",
     "LLM_FAILURES_TABLE_NAME",
@@ -1130,6 +900,7 @@ __all__: list[str] = [
     "PLUGIN_SOURCE_TEXT_RULES_TABLE_NAME",
     "PLUGIN_SOURCE_RUNTIME_WRITE_MAP_TABLE_NAME",
     "PLUGIN_SOURCE_RUNTIME_SCAN_CACHE_TABLE_NAME",
+    "PLUGIN_SOURCE_ASSESSMENTS_TABLE_NAME",
     "SOURCE_SNAPSHOT_FILES_TABLE_NAME",
     "RULE_REVIEW_STATES_TABLE_NAME",
     "SOURCE_RESIDUAL_RULES_TABLE_NAME",
@@ -1153,8 +924,10 @@ __all__: list[str] = [
     "SELECT_PLUGIN_SOURCE_TEXT_RULES",
     "SELECT_PLUGIN_SOURCE_RUNTIME_WRITE_MAPS",
     "SELECT_PLUGIN_SOURCE_RUNTIME_SCAN_CACHE",
+    "SELECT_PLUGIN_SOURCE_ASSESSMENT",
     "SELECT_SOURCE_SNAPSHOT_FILES",
     "SELECT_RULE_REVIEW_STATE",
+    "SELECT_RUNNING_TRANSLATION_RUNS",
     "SELECT_TRANSLATION_QUALITY_ERRORS_BY_RUN",
     "SELECT_TRANSLATION_RUN",
     "SELECT_TRANSLATED_ITEMS",
@@ -1163,6 +936,8 @@ __all__: list[str] = [
     "SELECT_TRANSLATION_PATHS",
     "SELECT_SCHEMA_VERSION",
     "SELECT_TABLE_NAMES",
+    "SELECT_UNFINISHED_WRITE_TRANSACTION",
+    "SELECT_WRITE_TRANSACTION",
     "SELECT_TERMINOLOGY_BUNDLE_STATE",
     "SELECT_TEXT_GLOSSARY_TERMS",
     "SELECT_FIELD_TRANSLATION_TERMS",
@@ -1176,8 +951,14 @@ __all__: list[str] = [
     "TRANSLATION_TABLE_NAME",
     "UPSERT_METADATA",
     "UPSERT_LANGUAGE_SETTINGS",
+    "UPSERT_PLUGIN_SOURCE_ASSESSMENT",
     "UPSERT_SCHEMA_VERSION",
     "UPSERT_TERMINOLOGY_BUNDLE_STATE",
-    "UPSERT_TRANSLATION_RUN",
+    "UPDATE_TRANSLATION_RUN_CAS",
+    "INSERT_WRITE_TRANSACTION",
+    "UPDATE_WRITE_TRANSACTION_STATE",
+    "UPDATE_WRITE_TRANSACTION_PREPARED",
+    "UPDATE_WRITE_TRANSACTION_COMMITTED",
+    "WRITE_TRANSACTIONS_TABLE_NAME",
     "CURRENT_SCHEMA_VERSION",
 ]

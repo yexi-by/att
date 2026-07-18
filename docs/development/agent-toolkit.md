@@ -44,4 +44,4 @@
 ## 测试覆盖
 
 - `tests/test_agent_toolkit.py` 覆盖 Agent 报告、工作区、规则校验、质量报告、人工译文表、源文残留例外和反馈反查。
-- `tests/test_skill_protocol.py` 覆盖 Skill 与 CLI 协议之间的关键一致性。
+- Skill 协议不由 pytest 固定；开发版和发行版生成漂移通过 `uv run --locked python scripts/generate_skill_protocol.py --check` 检查。

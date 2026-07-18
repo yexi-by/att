@@ -10,7 +10,6 @@ from typing import cast
 
 from app.rmmz.text_rules import JsonValue, coerce_json_value
 
-
 JSON_STRING_SHELL_PATTERN: re.Pattern[str] = re.compile(r'^\s*"(?:[^"\\]|\\.)*"\s*$', re.DOTALL)
 DOUBLED_CONTROL_LITERAL_PATTERN: re.Pattern[str] = re.compile(
     r"\\\\(?:[A-Za-z]+\d*(?:\[[^\]\r\n]{0,64}\])?|[{}\\$.\|!><^]|[nrt])"
@@ -77,7 +76,7 @@ def decode_json_container_text(raw_text: str) -> JsonContainerDecodeResult | Non
         try:
             decoded = cast(object, json.loads(current_text))
             parsed = coerce_json_value(decoded)
-        except (TypeError, json.JSONDecodeError):
+        except TypeError, json.JSONDecodeError:
             return None
 
         if isinstance(parsed, dict | list):

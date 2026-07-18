@@ -19,7 +19,6 @@ def repair_json(
     schema_repair_mode: Literal["standard", "salvage"] = "standard",
     **json_dumps_args: object,
 ) -> str: ...
-
 @overload
 def repair_json(
     json_str: str = "",
@@ -35,7 +34,6 @@ def repair_json(
     schema_repair_mode: Literal["standard", "salvage"] = "standard",
     **json_dumps_args: object,
 ) -> JSONRepairValue: ...
-
 @overload
 def repair_json(
     json_str: str = "",
@@ -51,5 +49,4 @@ def repair_json(
     schema_repair_mode: Literal["standard", "salvage"] = "standard",
     **json_dumps_args: object,
 ) -> tuple[JSONRepairValue, list[dict[str, str]]]: ...
-
 def loads(s: str, *args: object, **kwargs: object) -> JSONRepairValue: ...

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.native_file_hashing import NativeFileHashInput, hash_native_files
 from app.rmmz.schema import GameLayout
 
 
@@ -55,10 +55,7 @@ def validate_clean_source_snapshot_target(layout: GameLayout) -> None:
         if path.exists()
     ]
     if existing_paths:
-        relative_paths = [
-            path.relative_to(layout.content_root).as_posix()
-            for path in existing_paths
-        ]
+        relative_paths = [path.relative_to(layout.content_root).as_posix() for path in existing_paths]
         raise FileExistsError(
             "add-game 只支持未生成可信源快照的干净游戏目录；已存在 "
             + "、".join(sorted(relative_paths))
@@ -94,7 +91,6 @@ def collect_source_snapshot_records(
 ) -> list[SourceSnapshotFileRecord]:
     """收集可信源快照当前磁盘文件 hash，用于写入数据库 manifest。"""
     validate_source_snapshot_files(layout)
-    records: list[SourceSnapshotFileRecord] = []
     snapshot_paths = [
         *sorted(
             (
@@ -107,17 +103,23 @@ def collect_source_snapshot_records(
         layout.plugins_origin_path,
         *sorted(_iter_direct_plugin_source_files(layout.plugin_source_origin_dir), key=lambda path: path.name),
     ]
-    for file_path in snapshot_paths:
-        relative_path = file_path.relative_to(layout.content_root).as_posix()
-        records.append(
-            SourceSnapshotFileRecord(
-                relative_path=relative_path,
-                sha256=file_sha256(file_path),
-                byte_size=file_path.stat().st_size,
-                updated_at=updated_at,
-            )
+    hash_inputs = [
+        NativeFileHashInput(
+            id=f"source_snapshot_{index:06d}",
+            relative_path=file_path.relative_to(layout.content_root).as_posix(),
         )
-    return records
+        for index, file_path in enumerate(snapshot_paths)
+    ]
+    hash_results = hash_native_files(root=layout.content_root, files=hash_inputs)
+    return [
+        SourceSnapshotFileRecord(
+            relative_path=result.relative_path,
+            sha256=result.sha256,
+            byte_size=result.byte_size,
+            updated_at=updated_at,
+        )
+        for result in hash_results
+    ]
 
 
 def validate_source_snapshot_manifest(
@@ -128,8 +130,7 @@ def validate_source_snapshot_manifest(
     """确认数据库 manifest 与磁盘可信源快照一致。"""
     validate_source_snapshot_files(layout)
     expected = {
-        record.relative_path: record
-        for record in collect_source_snapshot_records(layout=layout, updated_at="")
+        record.relative_path: record for record in collect_source_snapshot_records(layout=layout, updated_at="")
     }
     actual = {record.relative_path: record for record in records}
     missing = sorted(set(expected) - set(actual))
@@ -154,18 +155,6 @@ def validate_source_snapshot_manifest(
         raise RuntimeError("可信源快照 manifest 与磁盘文件不一致：" + "；".join(parts))
 
 
-def file_sha256(file_path: Path) -> str:
-    """计算单个文件的 SHA-256。"""
-    digest = hashlib.sha256()
-    with file_path.open("rb") as file:
-        while True:
-            chunk = file.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _iter_direct_plugin_source_files(source_dir: Path) -> list[Path]:
     """列出 `js/plugins` 直接 JS 文件。"""
     if not source_dir.is_dir():
@@ -180,7 +169,6 @@ __all__ = [
     "SourceSnapshotFileRecord",
     "collect_source_snapshot_records",
     "create_source_snapshot_for_clean_game",
-    "file_sha256",
     "remove_source_snapshot_artifacts",
     "validate_clean_source_snapshot_target",
     "validate_source_snapshot_files",

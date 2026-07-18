@@ -1,30 +1,35 @@
 """
 正文翻译校验模块。
 
-负责解析模型返回的 JSON，按 `location_path` 映射回翻译条目，并执行漏翻、
+负责解析模型返回的 JSON，按批次短 ID 映射回本地条目，并执行漏翻、
 占位符和源文残留校验。
 """
 
-import asyncio
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 from json_repair import repair_json
 from pydantic import BaseModel, RootModel
 
-from app.rmmz.schema import ErrorType, TranslationErrorItem, TranslationItem
 from app.rmmz.placeholder_mapping import (
     build_original_placeholder_queues,
     consume_original_placeholder,
 )
-from app.rmmz.text_rules import ControlSequenceSpan, TextRules
-from app.source_residual import SourceResidualRuleSet, check_source_residual_for_item
+from app.rmmz.schema import ErrorType, TranslationErrorItem, TranslationItem
 from app.rmmz.text_layout import (
     align_long_text_lines,
     normalize_translated_wrapping_punctuation,
 )
+from app.rmmz.text_rules import ControlSequenceSpan, TextRules
+from app.source_residual import SourceResidualRuleSet, check_source_residual_for_item
+from app.translation.batch import (
+    TranslationBatch,
+    TranslationPromptBinding,
+    bind_translation_items,
+)
 from app.translation.text_structure import validate_translation_text_structure
 
 ERR_PARSE_FAILED: ErrorType = "模型返回不可解析"
-ERR_MISSING_KEY: ErrorType = "AI漏翻"
 ERR_TEXT_STRUCTURE: ErrorType = "文本结构不匹配"
 ERR_PLACEHOLDER_MISMATCH: ErrorType = "控制符不匹配"
 ERR_SOURCE_RESIDUAL: ErrorType = "源文残留"
@@ -43,58 +48,102 @@ class TranslationResponse(RootModel[list[TranslationResponseItem]]):
     """正文翻译返回结果模型。"""
 
 
-async def verify_translation_batch(
+class TranslationResponseProtocolError(ValueError):
+    """模型返回的批次短 ID 不满足一一对应协议。"""
+
+    def __init__(self, *, code: str, detail: str) -> None:
+        """保存稳定错误码和可读详情。"""
+        super().__init__(f"{code}: {detail}")
+        self.code: str = code
+        self.detail: str = detail
+
+
+@dataclass(frozen=True, slots=True)
+class TranslationBatchVerification:
+    """一个批次完成本地协议与质量检查后的纯结果。"""
+
+    right_items: list[TranslationItem]
+    error_items: list[TranslationErrorItem]
+
+
+type ValidateTranslationCandidates = Callable[
+    [Sequence[TranslationItem]],
+    dict[str, list[str]],
+]
+
+
+def verify_translation_batch_result(
     *,
     ai_result: str,
-    items: list[TranslationItem],
-    right_queue: asyncio.Queue[list[TranslationItem] | None],
-    error_queue: asyncio.Queue[list[TranslationErrorItem] | None],
+    batch: TranslationBatch,
     text_rules: TextRules,
     source_residual_rule_set: SourceResidualRuleSet | None = None,
-) -> None:
-    """解析模型返回并把通过校验/失败条目分别推入队列。"""
+    validate_candidates: ValidateTranslationCandidates | None = None,
+) -> TranslationBatchVerification:
+    """使用批次原始短 ID 绑定返回不依赖队列的校验结果。"""
+    return _verify_translation_items_result(
+        ai_result=ai_result,
+        items=batch.items,
+        bindings=batch.bindings,
+        text_rules=text_rules,
+        source_residual_rule_set=source_residual_rule_set,
+        validate_candidates=validate_candidates,
+    )
+
+
+def _verify_translation_items_result(
+    *,
+    ai_result: str,
+    items: Sequence[TranslationItem],
+    text_rules: TextRules,
+    source_residual_rule_set: SourceResidualRuleSet | None,
+    bindings: Sequence[TranslationPromptBinding] | None,
+    validate_candidates: ValidateTranslationCandidates | None,
+) -> TranslationBatchVerification:
+    """执行与队列和调度器无关的批次校验。"""
     right_items: list[TranslationItem] = []
     error_items: list[TranslationErrorItem] = []
+    resolved_bindings = _resolve_bindings(items=items, bindings=bindings)
 
     try:
         clean_result = repair_json(ai_result, return_objects=False)
 
         response_items = TranslationResponse.model_validate_json(clean_result).root
-        translation_map = _build_translation_line_map(response_items=response_items, items=items)
+        translation_map = _build_translation_line_map(
+            response_items=response_items,
+            bindings=resolved_bindings,
+        )
+    except TranslationResponseProtocolError as error:
+        error_items.extend(
+            _build_batch_protocol_error_items(
+                items=items,
+                ai_result=ai_result,
+                detail=[
+                    "模型返回的短 ID 与当前批次不一致",
+                    f"协议错误 [{error.code}]: {error.detail}",
+                ],
+            )
+        )
+        return TranslationBatchVerification(
+            right_items=right_items,
+            error_items=error_items,
+        )
     except Exception as error:
-        for item in items:
-            error_items.append(
-                TranslationErrorItem(
-                    location_path=item.location_path,
-                    item_type=item.item_type,
-                    role=item.role,
-                    original_lines=list(item.original_lines),
-                    translation_lines=[],
-                    error_type=ERR_PARSE_FAILED,
-                    error_detail=["模型返回无法解析为 JSON 数组", f"详细错误: {error}"],
-                    model_response=ai_result,
-                )
+        error_items.extend(
+            _build_batch_protocol_error_items(
+                items=items,
+                ai_result=ai_result,
+                detail=["模型返回无法解析为 JSON 数组", f"详细错误: {error}"],
             )
-        if error_items:
-            await error_queue.put(error_items)
-        return
+        )
+        return TranslationBatchVerification(
+            right_items=right_items,
+            error_items=error_items,
+        )
 
-    for item in items:
-        model_translation_lines = translation_map.get(item.location_path)
-        if model_translation_lines is None:
-            error_items.append(
-                TranslationErrorItem(
-                    location_path=item.location_path,
-                    item_type=item.item_type,
-                    role=item.role,
-                    original_lines=list(item.original_lines),
-                    translation_lines=[],
-                    error_type=ERR_MISSING_KEY,
-                    error_detail=[f"AI漏翻: 未找到键 {item.location_path}"],
-                    model_response=ai_result,
-                )
-            )
-            continue
+    for binding in resolved_bindings:
+        item = binding.item
+        model_translation_lines = translation_map[binding.request_id]
         if _is_empty_translation_lines(model_translation_lines):
             error_items.append(
                 TranslationErrorItem(
@@ -135,7 +184,9 @@ async def verify_translation_batch(
                         original_lines=list(item.original_lines),
                         translation_lines=list(translation_lines),
                         error_type=ERR_ARRAY_LINE_COUNT,
-                        error_detail=[f"选项行数不匹配: 期望 {len(item.original_lines)} 行, 实际 {len(translation_lines)} 行"],
+                        error_detail=[
+                            f"选项行数不匹配: 期望 {len(item.original_lines)} 行, 实际 {len(translation_lines)} 行"
+                        ],
                         model_response=ai_result,
                     )
                 )
@@ -219,27 +270,99 @@ async def verify_translation_batch(
         item.restore_placeholders()
         right_items.append(item)
 
-    if right_items:
-        await right_queue.put(right_items)
-    if error_items:
-        await error_queue.put(error_items)
+    if validate_candidates is not None and right_items:
+        validation_errors = validate_candidates(right_items)
+        validated_right_items: list[TranslationItem] = []
+        for item in right_items:
+            details = validation_errors.get(item.location_path, [])
+            if not details:
+                validated_right_items.append(item)
+                continue
+            error_items.append(
+                TranslationErrorItem(
+                    location_path=item.location_path,
+                    item_type=item.item_type,
+                    role=item.role,
+                    original_lines=list(item.original_lines),
+                    translation_lines=list(item.translation_lines),
+                    error_type=ERR_TEXT_STRUCTURE,
+                    error_detail=list(details),
+                    model_response=ai_result,
+                )
+            )
+        right_items = validated_right_items
+
+    return TranslationBatchVerification(
+        right_items=right_items,
+        error_items=error_items,
+    )
 
 
 def _build_translation_line_map(
     *,
     response_items: list[TranslationResponseItem],
-    items: list[TranslationItem],
+    bindings: Sequence[TranslationPromptBinding],
 ) -> dict[str, list[str]]:
-    """按本地批次条目收窄模型译文，忽略无关字段和未知 ID。"""
-    valid_ids = {item.location_path for item in items}
+    """严格校验模型短 ID 与本地批次绑定一一对应。"""
+    valid_ids = {binding.request_id for binding in bindings}
     translation_map: dict[str, list[str]] = {}
     for response_item in response_items:
         if response_item.id not in valid_ids:
-            continue
+            raise TranslationResponseProtocolError(
+                code="response_unknown_id",
+                detail=f"模型返回了当前批次不存在的 ID: {response_item.id}",
+            )
         if response_item.id in translation_map:
-            raise ValueError(f"模型返回重复 ID: {response_item.id}")
+            raise TranslationResponseProtocolError(
+                code="response_duplicate_id",
+                detail=f"模型重复返回 ID: {response_item.id}",
+            )
         translation_map[response_item.id] = list(response_item.translation_lines)
+    missing_ids = [binding.request_id for binding in bindings if binding.request_id not in translation_map]
+    if missing_ids:
+        raise TranslationResponseProtocolError(
+            code="response_missing_id",
+            detail=f"模型漏掉了当前批次 ID: {', '.join(missing_ids)}",
+        )
     return translation_map
+
+
+def _build_batch_protocol_error_items(
+    *,
+    items: Sequence[TranslationItem],
+    ai_result: str,
+    detail: list[str],
+) -> list[TranslationErrorItem]:
+    """把批次级模型协议错误映射到所有本地条目。"""
+    return [
+        TranslationErrorItem(
+            location_path=item.location_path,
+            item_type=item.item_type,
+            role=item.role,
+            original_lines=list(item.original_lines),
+            translation_lines=[],
+            error_type=ERR_PARSE_FAILED,
+            error_detail=list(detail),
+            model_response=ai_result,
+        )
+        for item in items
+    ]
+
+
+def _resolve_bindings(
+    *,
+    items: Sequence[TranslationItem],
+    bindings: Sequence[TranslationPromptBinding] | None,
+) -> tuple[TranslationPromptBinding, ...]:
+    """优先使用批次原始绑定，并校验调用方没有替换或重排条目。"""
+    if bindings is None:
+        return bind_translation_items(items)
+    resolved_bindings = tuple(bindings)
+    if len(resolved_bindings) != len(items) or any(
+        binding.item is not item for binding, item in zip(resolved_bindings, items, strict=False)
+    ):
+        raise ValueError("翻译批次绑定与待校验条目不一致")
+    return resolved_bindings
 
 
 def _is_empty_translation_lines(translation_lines: list[str]) -> bool:
@@ -272,10 +395,11 @@ def _mask_known_translation_controls(
             return "[CUSTOM_UNEXPECTED_1]"
         return span.original
 
-    return [
-        text_rules.replace_rm_control_sequences(line, replacer)
-        for line in translation_lines
-    ]
+    return [text_rules.replace_rm_control_sequences(line, replacer) for line in translation_lines]
 
 
-__all__: list[str] = ["verify_translation_batch"]
+__all__: list[str] = [
+    "TranslationBatchVerification",
+    "ValidateTranslationCandidates",
+    "verify_translation_batch_result",
+]

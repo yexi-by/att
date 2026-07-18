@@ -423,11 +423,7 @@ def _validate_allowed_terms_appear_in_item(
     visible_text = "\n".join(visible_text_parts)
     if ignore_case:
         visible_text_for_check = visible_text.casefold()
-        missing_terms = [
-            term
-            for term in allowed_terms
-            if term.casefold() not in visible_text_for_check
-        ]
+        missing_terms = [term for term in allowed_terms if term.casefold() not in visible_text_for_check]
     else:
         missing_terms = [term for term in allowed_terms if term not in visible_text]
     if missing_terms:

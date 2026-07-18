@@ -7,30 +7,31 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
+from typing import cast
 
 from app.agent_toolkit.placeholder_scan import (
+    PlaceholderCandidateAnalysis,
+    StructuredPlaceholderCandidateAnalysis,
+    analyze_placeholder_candidates,
+    analyze_structured_placeholder_candidates,
     count_uncovered_candidates,
-    placeholder_candidates_to_details,
-    scan_placeholder_candidates,
 )
 from app.application.errors import WorkflowGateError
 from app.config.schemas import Setting
 from app.event_command_text import resolve_event_command_codes
+from app.game_analysis import GameAnalysisContext
 from app.note_tag_text.exporter import collect_note_tag_candidates
 from app.persistence import TargetGameSession
-from app.plugin_text import collect_plugin_json_string_leaf_candidates, extract_plugin_name
+from app.persistence.plugin_source_assessment_records import PLUGIN_SOURCE_SCANNER_VERSION
+from app.persistence.records import RuleReviewStateRecord
 from app.plugin_source_text import (
-    PluginSourceScan,
-    build_plugin_source_scan,
     collect_plugin_source_review_coverage,
     filter_fresh_plugin_source_text_rules,
 )
+from app.plugin_text import collect_plugin_json_string_leaf_candidates, extract_plugin_name
 from app.rmmz.commands import iter_all_commands
-from app.rmmz.control_codes import StructuredPlaceholderRule
-from app.rmmz.mv_namebox import mv_virtual_namebox_candidate_details
-from app.rmmz.schema import GameData, TranslationData, TranslationItem
+from app.rmmz.schema import GameData
 from app.rmmz.text_rules import JsonArray, JsonValue, TextRules
 from app.rule_review import (
     EVENT_COMMAND_TEXT_RULE_DOMAIN,
@@ -41,14 +42,17 @@ from app.rule_review import (
     STRUCTURED_PLACEHOLDER_RULE_DOMAIN,
     RuleReviewDomain,
     event_command_rule_scope_hash_for_codes,
+    event_command_rule_scope_hash_for_snapshots,
     mv_virtual_namebox_rule_scope_hash,
     note_tag_rule_scope_hash_for_candidates,
     placeholder_rule_scope_hash,
     plugin_rule_scope_hash,
+    plugin_source_rule_scope_hash,
+    plugin_source_text_rules_hash,
     structured_placeholder_rule_scope_hash,
 )
 from app.terminology import collect_terminology_bundle_errors
-from app.text_scope import TextScopeResult, TextScopeService, read_fresh_plugin_text_rules
+from app.text_scope import TextScopeResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,49 +66,40 @@ class WorkflowGateIssue:
 async def collect_workflow_gate_errors(
     *,
     session: TargetGameSession,
-    game_data: GameData,
+    context: GameAnalysisContext,
     setting: Setting,
-    text_rules: TextRules,
     custom_placeholder_rules_supplied: bool,
-    translated_items: list[TranslationItem] | None = None,
-    scope: TextScopeResult | None = None,
-    plugin_source_scan: PluginSourceScan | None = None,
 ) -> list[WorkflowGateIssue]:
     """收集当前游戏不能继续翻译或写入的全部硬闸错误。"""
-    if scope is None:
-        scope = await TextScopeService().build(
-            session=session,
-            game_data=game_data,
-            text_rules=text_rules,
-            translated_items=translated_items,
-        )
+    text_rules = context.text_rules
+    scope = context.scope
     errors: list[WorkflowGateIssue] = []
     errors.extend(
         await _plugin_source_rule_gate_errors(
             session=session,
-            game_data=game_data,
-            text_rules=text_rules,
-            scan=plugin_source_scan,
+            context=context,
         )
     )
     errors.extend(await _terminology_gate_errors(session))
     errors.extend(
         await _external_rule_gate_errors(
             session=session,
-            game_data=game_data,
-            setting=setting,
-            text_rules=text_rules,
+            context=context,
         )
     )
     errors.extend(
         await _placeholder_gate_errors(
             session=session,
-            scope=scope,
-            text_rules=text_rules,
+            context=context,
             custom_placeholder_rules_supplied=custom_placeholder_rules_supplied,
         )
     )
-    errors.extend(await _structured_placeholder_gate_errors(session=session, scope=scope, text_rules=text_rules))
+    errors.extend(
+        await _structured_placeholder_gate_errors(
+            session=session,
+            context=context,
+        )
+    )
     errors.extend(_text_scope_gate_errors(scope=scope, text_rules=text_rules))
     _ = setting
     return errors
@@ -113,16 +108,14 @@ async def collect_workflow_gate_errors(
 async def collect_external_text_rule_gate_errors(
     *,
     session: TargetGameSession,
-    game_data: GameData,
+    context: GameAnalysisContext,
     setting: Setting,
-    text_rules: TextRules,
 ) -> list[WorkflowGateIssue]:
     """收集三类外部文本规则未完成导致的前置错误。"""
+    _ = setting
     return await _external_rule_gate_errors(
         session=session,
-        game_data=game_data,
-        setting=setting,
-        text_rules=text_rules,
+        context=context,
     )
 
 
@@ -135,27 +128,32 @@ def format_workflow_gate_error(errors: list[WorkflowGateIssue]) -> str:
 async def assert_workflow_gate_passed(
     *,
     session: TargetGameSession,
-    game_data: GameData,
+    context: GameAnalysisContext,
     setting: Setting,
-    text_rules: TextRules,
     custom_placeholder_rules_supplied: bool,
-    translated_items: list[TranslationItem] | None = None,
-    scope: TextScopeResult | None = None,
-    plugin_source_scan: PluginSourceScan | None = None,
 ) -> None:
     """不满足流程前置条件时立刻中断当前任务。"""
     errors = await collect_workflow_gate_errors(
         session=session,
-        game_data=game_data,
+        context=context,
         setting=setting,
-        text_rules=text_rules,
         custom_placeholder_rules_supplied=custom_placeholder_rules_supplied,
-        translated_items=translated_items,
-        scope=scope,
-        plugin_source_scan=plugin_source_scan,
     )
     if errors:
-        raise WorkflowGateError(format_workflow_gate_error(errors))
+        primary_error = errors[0]
+        raise WorkflowGateError(
+            format_workflow_gate_error(errors),
+            code=primary_error.code,
+            details={
+                "issues": [
+                    {
+                        "code": error.code,
+                        "message": error.message,
+                    }
+                    for error in errors
+                ]
+            },
+        )
 
 
 def ensure_empty_rule_import_allowed(
@@ -243,6 +241,26 @@ def event_command_rule_scope_hash_for_command_codes(
     return event_command_rule_scope_hash_for_codes(game_data=game_data, command_codes=command_codes)
 
 
+def event_command_codes_from_review_state(
+    state: RuleReviewStateRecord,
+) -> frozenset[int] | None:
+    """从空规则审查记录恢复当时实际检查的事件编码集合。"""
+    if state.scope_contract_version != 1:
+        return None
+    if state.scope_payload.get("kind") != "event_command_codes":
+        return None
+    raw_codes_value = state.scope_payload.get("command_codes")
+    if not isinstance(raw_codes_value, list) or not raw_codes_value:
+        return None
+    raw_codes = cast(list[object], raw_codes_value)
+    codes: set[int] = set()
+    for raw_code in raw_codes:
+        if isinstance(raw_code, bool) or not isinstance(raw_code, int):
+            return None
+        codes.add(raw_code)
+    return frozenset(codes) if codes else None
+
+
 def count_note_tag_rule_candidates(*, game_data: GameData, text_rules: TextRules) -> int:
     """统计当前 Note 标签候选中实际含可翻译值的数量。"""
     candidates = collect_note_tag_candidates(game_data=game_data, text_rules=text_rules)
@@ -255,77 +273,14 @@ def note_tag_rule_scope_hash_for_text_rules(*, game_data: GameData, text_rules: 
     return note_tag_rule_scope_hash_for_candidates(candidates)
 
 
-def normal_placeholder_scope_hash(
-    *,
-    translation_data_map: dict[str, TranslationData],
-    text_rules: TextRules,
-) -> str:
-    """计算普通占位符空规则确认依赖的当前候选哈希。"""
-    candidates = scan_placeholder_candidates(translation_data_map, text_rules)
-    return placeholder_rule_scope_hash(placeholder_candidates_to_details(candidates))
+def normal_placeholder_scope_hash_from_analysis(analysis: PlaceholderCandidateAnalysis) -> str:
+    """从已扫描的普通占位符事实计算范围哈希。"""
+    return placeholder_rule_scope_hash(analysis.details)
 
 
-def structured_placeholder_scope_hash(
-    *,
-    translation_data_map: dict[str, TranslationData],
-    structured_rules: tuple[StructuredPlaceholderRule, ...],
-) -> str:
-    """计算结构化占位符空规则确认依赖的当前候选哈希。"""
-    details = collect_structured_placeholder_candidate_details(
-        translation_data_map=translation_data_map,
-        structured_rules=structured_rules,
-    )
-    return structured_placeholder_rule_scope_hash(details)
-
-
-def count_uncovered_structured_placeholder_candidates(
-    *,
-    translation_data_map: dict[str, TranslationData],
-    structured_rules: tuple[StructuredPlaceholderRule, ...],
-) -> int:
-    """统计未被结构化规则覆盖的协议外壳候选数量。"""
-    details = collect_structured_placeholder_candidate_details(
-        translation_data_map=translation_data_map,
-        structured_rules=structured_rules,
-    )
-    return sum(
-        1
-        for detail in details
-        if isinstance(detail, dict) and detail.get("covered") is not True
-    )
-
-
-def collect_structured_placeholder_candidate_details(
-    *,
-    translation_data_map: dict[str, TranslationData],
-    structured_rules: tuple[StructuredPlaceholderRule, ...],
-) -> JsonArray:
-    """扫描当前正文中的结构化协议外壳候选和规则覆盖情况。"""
-    details: JsonArray = []
-    seen_candidates: set[tuple[str, int, int, int, str]] = set()
-    for item in _iter_translation_items_from_map(translation_data_map):
-        for line_index, line in enumerate(item.original_lines):
-            covered_ranges = _structured_rule_covered_ranges(text=line, structured_rules=structured_rules)
-            for start, end, candidate in _iter_structured_shell_candidate_matches(line):
-                key = (item.location_path, line_index, start, end, candidate)
-                if key in seen_candidates:
-                    continue
-                seen_candidates.add(key)
-                matching_rules = [
-                    rule_name
-                    for range_start, range_end, rule_name in covered_ranges
-                    if range_start <= start and range_end >= end
-                ]
-                details.append(
-                    {
-                        "location_path": item.location_path,
-                        "line_number": line_index + 1,
-                        "candidate": candidate,
-                        "covered": bool(matching_rules),
-                        "matching_rules": [rule_name for rule_name in matching_rules],
-                    }
-                )
-    return details
+def structured_placeholder_scope_hash_from_analysis(analysis: StructuredPlaceholderCandidateAnalysis) -> str:
+    """从已扫描的结构化外壳事实计算范围哈希。"""
+    return structured_placeholder_rule_scope_hash(analysis.details)
 
 
 async def _terminology_gate_errors(session: TargetGameSession) -> list[WorkflowGateIssue]:
@@ -341,16 +296,13 @@ async def _terminology_gate_errors(session: TargetGameSession) -> list[WorkflowG
 async def _external_rule_gate_errors(
     *,
     session: TargetGameSession,
-    game_data: GameData,
-    setting: Setting,
-    text_rules: TextRules,
+    context: GameAnalysisContext,
 ) -> list[WorkflowGateIssue]:
     """检查插件、事件指令和 Note 标签外部规则是否完成导入或空结果确认。"""
+    game_data = context.game_data
     errors: list[WorkflowGateIssue] = []
-    plugin_rules, stale_plugin_rules = await read_fresh_plugin_text_rules(
-        session=session,
-        game_data=game_data,
-    )
+    plugin_rules = context.plugin_rules
+    stale_plugin_rules = context.stale_plugin_rules
     if stale_plugin_rules:
         errors.append(
             WorkflowGateIssue(
@@ -369,42 +321,54 @@ async def _external_rule_gate_errors(
         )
 
     if game_data.layout.engine_kind == "mv":
-        mv_virtual_namebox_rules = await session.read_mv_virtual_namebox_rules()
-        if not mv_virtual_namebox_rules:
+        if not context.mv_virtual_namebox_rules:
             errors.extend(
                 await _empty_rule_review_errors(
                     session=session,
                     rule_domain=MV_VIRTUAL_NAMEBOX_RULE_DOMAIN,
                     current_scope_hash=mv_virtual_namebox_rule_scope_hash(
-                        mv_virtual_namebox_candidate_details(game_data)
+                        [candidate for candidate in context.mv_virtual_namebox_candidates]
                     ),
                     label="MV 虚拟名字框规则",
                 )
             )
 
-    event_rules = await session.read_event_command_text_rules()
-    if not event_rules:
-        errors.extend(
-            await _empty_rule_review_errors(
-                session=session,
-                rule_domain=EVENT_COMMAND_TEXT_RULE_DOMAIN,
-                current_scope_hash=event_command_rule_scope_hash_for_setting(
-                    game_data=game_data,
-                    setting=setting,
-                ),
-                label="事件指令规则",
+    if not context.event_rules:
+        state = await session.read_rule_review_state(rule_domain=EVENT_COMMAND_TEXT_RULE_DOMAIN)
+        if state is None or not state.reviewed_empty:
+            errors.append(
+                WorkflowGateIssue(
+                    code="event_command_text_missing",
+                    message="事件指令规则为空且没有显式确认当前游戏没有对应规则，检查没通过，不能继续",
+                )
             )
-        )
+        else:
+            reviewed_codes = event_command_codes_from_review_state(state)
+            if reviewed_codes is None:
+                errors.append(
+                    WorkflowGateIssue(
+                        code="event_command_text_invalid_empty_confirmation",
+                        message="事件指令空规则确认缺少实际检查的编码范围，请重新导出并确认规则",
+                    )
+                )
+            elif state.scope_hash != event_command_rule_scope_hash_for_snapshots(
+                command_snapshots=context.event_command_snapshots,
+                command_codes=reviewed_codes,
+            ):
+                errors.append(
+                    WorkflowGateIssue(
+                        code="event_command_text_stale_empty_confirmation",
+                        message="事件指令规则曾确认为空，但已确认编码范围内的游戏内容发生变化，请重新扫描并导入规则",
+                    )
+                )
 
-    note_rules = await session.read_note_tag_text_rules()
-    if not note_rules:
+    if not context.note_tag_rules:
         errors.extend(
             await _empty_rule_review_errors(
                 session=session,
                 rule_domain=NOTE_TAG_TEXT_RULE_DOMAIN,
-                current_scope_hash=note_tag_rule_scope_hash_for_text_rules(
-                    game_data=game_data,
-                    text_rules=text_rules,
+                current_scope_hash=note_tag_rule_scope_hash_for_candidates(
+                    [candidate for candidate in context.note_candidates]
                 ),
                 label="Note 标签规则",
             )
@@ -415,20 +379,57 @@ async def _external_rule_gate_errors(
 async def _plugin_source_rule_gate_errors(
     *,
     session: TargetGameSession,
-    game_data: GameData,
-    text_rules: TextRules,
-    scan: PluginSourceScan | None = None,
+    context: GameAnalysisContext,
 ) -> list[WorkflowGateIssue]:
     """高风险插件源码文本必须先确认并导入源码规则。"""
-    records = await session.read_plugin_source_text_rules()
-    if scan is None and not records:
-        return []
-    if scan is None:
-        scan = build_plugin_source_scan(game_data=game_data, text_rules=text_rules)
+    text_rules = context.text_rules
+    records = list(context.plugin_source_rules)
+    scan = context.plugin_source_scan
+    if scan.risk.read_error_file_count:
+        missing_count = scan.missing_enabled_file_count
+        unreadable_count = scan.unreadable_enabled_file_count
+        failure_summary = "、".join(
+            part
+            for part in (
+                f"缺失 {missing_count} 个" if missing_count else "",
+                f"读取失败 {unreadable_count} 个" if unreadable_count else "",
+            )
+            if part
+        )
+        return [
+            WorkflowGateIssue(
+                code="plugin_source_read_error",
+                message=(
+                    f"有 {scan.risk.read_error_file_count} 个已启用插件的翻译源源码不可用（{failure_summary}），"
+                    "当前风险扫描结果不可信，请补齐缺失文件或将无法读取的源码转换为 UTF-8 后重新扫描"
+                ),
+            )
+        ]
+    assessment = await session.read_plugin_source_assessment()
+    if assessment is None:
+        return [
+            WorkflowGateIssue(
+                code="plugin_source_assessment_missing",
+                message="插件源码尚未完成当前规则下的风险扫描，请先运行 scan-plugin-source-text 或准备 Agent 工作区",
+            )
+        ]
+    current_source_hash = plugin_source_rule_scope_hash(scan=scan)
+    current_text_rules_hash = plugin_source_text_rules_hash(text_rules)
+    if (
+        assessment.source_hash != current_source_hash
+        or assessment.text_rules_hash != current_text_rules_hash
+        or assessment.scanner_version != PLUGIN_SOURCE_SCANNER_VERSION
+        or assessment.high_risk != scan.risk.high_risk
+        or assessment.candidate_count != len(scan.candidates)
+    ):
+        return [
+            WorkflowGateIssue(
+                code="plugin_source_assessment_stale",
+                message="插件源码、文本规则或扫描器已经变化，请重新运行插件源码风险扫描",
+            )
+        ]
     fresh_records, stale_records = filter_fresh_plugin_source_text_rules(
-        game_data=game_data,
         rule_records=records,
-        text_rules=text_rules,
         scan=scan,
     )
     if stale_records:
@@ -467,13 +468,14 @@ async def _plugin_source_rule_gate_errors(
 async def _placeholder_gate_errors(
     *,
     session: TargetGameSession,
-    scope: TextScopeResult,
-    text_rules: TextRules,
+    context: GameAnalysisContext,
     custom_placeholder_rules_supplied: bool,
 ) -> list[WorkflowGateIssue]:
     """检查普通自定义占位符规则是否覆盖当前正文候选。"""
-    candidates = scan_placeholder_candidates(scope.translation_data_map, text_rules)
-    uncovered_count = count_uncovered_candidates(candidates)
+    scope = context.scope
+    text_rules = context.text_rules
+    analysis = analyze_placeholder_candidates(scope.translation_data_map, text_rules)
+    uncovered_count = count_uncovered_candidates(analysis.candidates)
     errors: list[WorkflowGateIssue] = []
     if uncovered_count:
         errors.append(
@@ -484,10 +486,9 @@ async def _placeholder_gate_errors(
         )
     if custom_placeholder_rules_supplied:
         return errors
-    placeholder_records = await session.read_placeholder_rules()
-    if placeholder_records:
+    if context.placeholder_rules:
         return errors
-    current_scope_hash = placeholder_rule_scope_hash(placeholder_candidates_to_details(candidates))
+    current_scope_hash = normal_placeholder_scope_hash_from_analysis(analysis)
     errors.extend(
         await _empty_rule_review_errors(
             session=session,
@@ -502,19 +503,13 @@ async def _placeholder_gate_errors(
 async def _structured_placeholder_gate_errors(
     *,
     session: TargetGameSession,
-    scope: TextScopeResult,
-    text_rules: TextRules,
+    context: GameAnalysisContext,
 ) -> list[WorkflowGateIssue]:
     """检查结构化占位符规则是否覆盖当前正文候选。"""
-    structured_details = collect_structured_placeholder_candidate_details(
-        translation_data_map=scope.translation_data_map,
-        structured_rules=text_rules.structured_placeholder_rules,
-    )
-    uncovered_count = sum(
-        1
-        for detail in structured_details
-        if isinstance(detail, dict) and detail.get("covered") is not True
-    )
+    scope = context.scope
+    text_rules = context.text_rules
+    analysis = analyze_structured_placeholder_candidates(scope.translation_data_map, text_rules)
+    uncovered_count = analysis.uncovered_count
     errors: list[WorkflowGateIssue] = []
     if uncovered_count:
         errors.append(
@@ -523,10 +518,9 @@ async def _structured_placeholder_gate_errors(
                 message=f"发现 {uncovered_count} 个未被结构化规则覆盖的协议外壳候选，请先导入结构化占位符规则",
             )
         )
-    structured_records = await session.read_structured_placeholder_rules()
-    if structured_records:
+    if context.structured_placeholder_rules:
         return errors
-    current_scope_hash = structured_placeholder_rule_scope_hash(structured_details)
+    current_scope_hash = structured_placeholder_scope_hash_from_analysis(analysis)
     errors.extend(
         await _empty_rule_review_errors(
             session=session,
@@ -613,70 +607,23 @@ def _candidate_int_sum(candidates: JsonArray, key: str) -> int:
     return total
 
 
-STRUCTURED_SHELL_CANDIDATE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"<[^<>\r\n]{1,160}(?:[:：=])[^<>\r\n]{0,240}>"),
-    re.compile(r"◆<[^<>\r\n]{1,160}>[^\s<>\r\n]?"),
-    re.compile(r"【[^】\r\n]{1,160}[:：][^】\r\n]{0,240}】"),
-)
-
-
-def _iter_translation_items_from_map(translation_data_map: dict[str, TranslationData]) -> list[TranslationItem]:
-    """从正文提取结果中取出翻译条目。"""
-    items: list[TranslationItem] = []
-    for translation_data in translation_data_map.values():
-        items.extend(translation_data.translation_items)
-    return items
-
-
-def _iter_structured_shell_candidate_matches(text: str) -> list[tuple[int, int, str]]:
-    """扫描常见结构化协议外壳候选。"""
-    matches: list[tuple[int, int, str]] = []
-    for pattern in STRUCTURED_SHELL_CANDIDATE_PATTERNS:
-        for match in pattern.finditer(text):
-            matches.append((match.start(), match.end(), match.group(0)))
-    matches.sort(key=lambda item: (item[0], -(item[1] - item[0]), item[2]))
-
-    selected: list[tuple[int, int, str]] = []
-    protected_until = -1
-    for start, end, candidate in matches:
-        if start < protected_until:
-            continue
-        selected.append((start, end, candidate))
-        protected_until = end
-    return selected
-
-
-def _structured_rule_covered_ranges(
-    *,
-    text: str,
-    structured_rules: tuple[StructuredPlaceholderRule, ...],
-) -> list[tuple[int, int, str]]:
-    """返回结构化规则完整命中范围。"""
-    ranges: list[tuple[int, int, str]] = []
-    for rule in structured_rules:
-        for match in rule.pattern.finditer(text):
-            ranges.append((match.start(), match.end(), rule.rule_name))
-    return ranges
-
-
 __all__: list[str] = [
     "WorkflowGateIssue",
     "collect_external_text_rule_gate_errors",
     "assert_workflow_gate_passed",
-    "collect_structured_placeholder_candidate_details",
     "collect_workflow_gate_errors",
     "count_event_command_rule_candidates_for_codes",
     "event_command_rule_scope_hash_for_setting",
     "event_command_rule_codes_for_setting",
+    "event_command_codes_from_review_state",
     "event_command_rule_scope_hash_for_command_codes",
     "count_event_command_rule_candidates",
     "count_note_tag_rule_candidates",
     "count_plugin_rule_candidates",
-    "count_uncovered_structured_placeholder_candidates",
     "ensure_empty_rule_confirmed",
     "ensure_empty_rule_import_allowed",
     "format_workflow_gate_error",
     "note_tag_rule_scope_hash_for_text_rules",
-    "normal_placeholder_scope_hash",
-    "structured_placeholder_scope_hash",
+    "normal_placeholder_scope_hash_from_analysis",
+    "structured_placeholder_scope_hash_from_analysis",
 ]

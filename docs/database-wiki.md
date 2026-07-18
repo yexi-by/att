@@ -36,6 +36,7 @@
 | `rule_review_states` | 保存空插件规则、空插件源码规则、空事件指令规则、空 Note 规则、空 MV 虚拟名字框规则和空占位符规则的显式确认状态 | `import-* --confirm-empty` |
 | `source_residual_rules` | 保存允许保留源语言片段的例外规则 | `import-source-residual-rules` |
 | `font_replacement_records` | 保存最近一次字体覆盖产生的可还原字体引用记录 | `write-back --confirm-font-overwrite`、`write-terminology --confirm-font-overwrite` |
+| `write_transactions` | 保存游戏文件原子写回事务及其恢复状态；未完成事务会阻止后续游戏文件修改 | `write-back`、`rebuild-active-runtime`、`write-terminology`、`recover-write-transaction` |
 | `translation_runs` | 保存正文翻译运行状态和统计快照 | `translate` |
 | `llm_failures` | 保存正文翻译运行中的模型故障记录 | `translate` |
 | `translation_quality_errors` | 保存模型返回后未通过项目检查的译文问题 | `translate`、`quality-report` 相关流程 |
@@ -372,6 +373,39 @@
 - 字体覆盖只在用户明确允许时执行。
 - 新一轮字体覆盖会整体替换这张表。
 - `restore-font` 使用此表和配置中的候选字体名判断需要还原哪些新字体引用；还原完成后会清空记录。
+
+### `write_transactions`
+
+保存游戏文件写回事务的数据库最终状态和严格恢复清单。文件系统 journal 只记录进度；即使 journal 已经清理，恢复也只依赖数据库 `payload_json` 中的目标、暂存、备份相对路径及新旧哈希。
+
+| 字段 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| `transaction_id` | `TEXT` | 主键 | 本次写事务标识，也是事务日志和同目录产物的关联键 |
+| `operation` | `TEXT` | 非空 | 发起事务的写文件操作，例如普通写回、运行文件重建或术语写回 |
+| `game_path` | `TEXT` | 非空 | 事务绑定的已注册游戏目录；恢复时必须与当前游戏一致 |
+| `state` | `TEXT` | 非空，枚举检查 | 当前数据库事务状态 |
+| `journal_path` | `TEXT` | 非空 | 文件事务日志路径 |
+| `payload_json` | `TEXT` | 可空，严格版本化 JSON | `version`、`database_committed` 和文件清单；每个文件含目标/暂存/备份相对路径、原始是否存在、旧/新 SHA-256 |
+| `created_at` | `TEXT` | 非空 | 事务创建时间 |
+| `updated_at` | `TEXT` | 非空 | 最近状态更新时间 |
+| `error` | `TEXT` | 非空 | 原写入错误或最近恢复错误；没有错误时为空字符串 |
+
+状态含义：
+
+- `preparing`：已在任何文件暂存前占用唯一未完成事务槽；此时 `payload_json` 必须为空，崩溃恢复不会猜测文件状态。
+- `prepared`：全部新文件与原文件备份均已持久化并验证，严格 `payload_json` 已在任何目标替换前落库；`database_committed=false`，恢复时以回滚为准。
+- `committed`：暂存运行视图已通过业务审计，目标文件已替换并复核哈希，插件源码运行映射、字体记录和 `payload_json.database_committed=true` 已在同一个 SQLite 事务中提交；恢复时保留新文件。
+- `finalized`：已提交文件通过最终哈希复核，事务日志、暂存文件和备份已清理，事务正常结束。
+- `rolled_back`：数据库未提交，旧文件已按备份恢复，本事务新建的目标文件已删除，事务结束。
+- `recovery_required`：自动回滚或状态收尾没有完成，通常伴随文件缺失、哈希冲突或持久化错误；后续游戏文件修改继续受阻，必须运行 `recover-write-transaction`。
+
+维护规则：
+
+- 同一个游戏数据库最多只能存在一个 `preparing`、`prepared`、`committed` 或 `recovery_required` 事务；它们统称未完成事务。
+- 写入顺序固定为：创建 `preparing` 记录→持久化全部暂存文件和同目录备份→保存严格清单并进入 `prepared`→审计覆盖计划的暂存运行视图→替换真实目标→只复核哈希→原子提交诊断记录与 `database_committed=true`。
+- `restore-font` 与普通写回共用这一协议；文件还原和清空 `font_replacement_records` 只能同时成功或同时回到旧状态。
+- `recover-write-transaction` 只以严格 `payload_json` 及其 `database_committed` 作为最终判断；journal 可缺失，但 payload 缺失时必须进入 `recovery_required`，不得盲目回滚或收尾。目标哈希不一致时保留现场并继续阻断。
+- `finalized` 和 `rolled_back` 是完成状态，不阻止下一次写文件操作；历史记录保留用于诊断。
 
 ### `translation_runs`
 

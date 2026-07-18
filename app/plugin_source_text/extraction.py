@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from app.rmmz.schema import GameData, PluginSourceTextRuleRecord, TranslationData, TranslationItem
-from app.rmmz.text_rules import TextRules, get_default_text_rules
+from app.rmmz.text_rules import TextRules
 
 from .models import PluginSourceScan
-from .scanner import PluginSourceCandidateIndex, build_plugin_source_candidate_index
+from .scanner import PluginSourceCandidateIndex
 
 
 class PluginSourceTextExtraction:
@@ -16,14 +16,14 @@ class PluginSourceTextExtraction:
         self,
         game_data: GameData,
         rule_records: list[PluginSourceTextRuleRecord],
-        text_rules: TextRules | None = None,
-        scan: PluginSourceScan | None = None,
+        text_rules: TextRules,
+        scan: PluginSourceScan,
     ) -> None:
         """初始化插件源码提取器。"""
         self.game_data: GameData = game_data
         self.rule_records: list[PluginSourceTextRuleRecord] = rule_records
-        self.text_rules: TextRules = text_rules if text_rules is not None else get_default_text_rules()
-        self.scan: PluginSourceScan | None = scan
+        self.text_rules: TextRules = text_rules
+        self.scan: PluginSourceScan = scan
 
     def extract_all_text(self) -> dict[str, TranslationData]:
         """按规则全量提取插件源码文本。"""
@@ -38,7 +38,6 @@ class PluginSourceTextExtraction:
             file_key = plugin_source_file_key(file_name)
             candidate_index = self._candidate_index_for_file(
                 file_name=file_name,
-                source=source,
             )
             items: list[TranslationItem] = []
             for record in records:
@@ -70,30 +69,22 @@ class PluginSourceTextExtraction:
                     ),
                     item_type="short_text",
                     original_lines=[candidate.text],
-                    source_line_paths=[
-                        plugin_source_location_path(file_name=record.file_name, selector=selector)
-                    ],
+                    source_line_paths=[plugin_source_location_path(file_name=record.file_name, selector=selector)],
                 )
             )
         return items
 
-    def _candidate_index_for_file(self, *, file_name: str, source: str) -> PluginSourceCandidateIndex:
-        """读取已有扫描结果或为单文件构建候选索引。"""
-        if self.scan is not None:
-            for file_scan in self.scan.files:
-                if file_scan.file_name != file_name:
-                    continue
-                candidates = file_scan.candidates
-                return PluginSourceCandidateIndex(
-                    candidates=candidates,
-                    by_selector={candidate.selector: candidate for candidate in candidates},
-                )
-        return build_plugin_source_candidate_index(
-            file_name=file_name,
-            source=source,
-            active=True,
-            text_rules=self.text_rules,
-        )
+    def _candidate_index_for_file(self, *, file_name: str) -> PluginSourceCandidateIndex:
+        """从调用者提供的唯一 AST 扫描读取单文件候选索引。"""
+        for file_scan in self.scan.files:
+            if file_scan.file_name != file_name:
+                continue
+            candidates = file_scan.candidates
+            return PluginSourceCandidateIndex(
+                candidates=candidates,
+                by_selector={candidate.selector: candidate for candidate in candidates},
+            )
+        return PluginSourceCandidateIndex(candidates=(), by_selector={})
 
 
 def plugin_source_file_key(file_name: str) -> str:
@@ -111,7 +102,7 @@ def parse_plugin_source_location_path(location_path: str) -> tuple[str, str] | N
     prefix = "js/plugins/"
     if not location_path.startswith(prefix):
         return None
-    remain = location_path[len(prefix):]
+    remain = location_path[len(prefix) :]
     parts = remain.split("/", 1)
     if len(parts) != 2:
         return None

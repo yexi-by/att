@@ -1,11 +1,15 @@
 [package]
 name = "att-mz-native"
-version = "0.1.8"
+version = "0.1.15"
 edition = "2024"
 
 [lib]
 name = "_native"
 crate-type = ["cdylib"]
+
+[[bin]]
+name = "att-mz"
+path = "src/bin/att-mz.rs"
 
 [dependencies]
 fancy-regex = "0.16"

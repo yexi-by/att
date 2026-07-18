@@ -5,11 +5,11 @@ from __future__ import annotations
 import re
 
 from app.rmmz.control_codes import (
-    ControlSequenceSpan,
     LITERAL_LINE_BREAK_MARKER,
     LITERAL_LINE_BREAK_PLACEHOLDER,
-    RawControlSequenceCandidate,
     REAL_LINE_BREAK_PLACEHOLDER,
+    ControlSequenceSpan,
+    RawControlSequenceCandidate,
 )
 from app.rmmz.schema import TranslationItem
 from app.rmmz.text_rules import TextRules
@@ -20,9 +20,7 @@ EXPLANATION_PREFIXES: tuple[str, ...] = (
     "翻译：",
     "翻译:",
 )
-EXPLANATION_MARKERS: tuple[str, ...] = (
-    "以下是翻译",
-)
+EXPLANATION_MARKERS: tuple[str, ...] = ("以下是翻译",)
 PROTOCOL_FIELD_PREFIXES: tuple[str, ...] = (
     "id:",
     "id：",
@@ -34,9 +32,7 @@ PROTOCOL_FIELD_PREFIXES: tuple[str, ...] = (
     "translation_lines：",
     '"translation_lines":',
 )
-SUSPICIOUS_N_PREFIX_PATTERN: re.Pattern[str] = re.compile(
-    r"^n(?=[\u3000-\u303f\u3400-\u9fff\uff00-\uffef])"
-)
+SUSPICIOUS_N_PREFIX_PATTERN: re.Pattern[str] = re.compile(r"^n(?=[\u3000-\u303f\u3400-\u9fff\uff00-\uffef])")
 
 
 def validate_translation_text_structure(
@@ -80,9 +76,7 @@ def collect_translation_text_structure_errors(
         errors.append(f"单字段文本必须只提供 1 条中文译文行，当前提供 {len(translation_lines)} 条")
         return errors
 
-    original_real_break_count = count_real_line_breaks(
-        item.original_lines_with_placeholders or item.original_lines
-    )
+    original_real_break_count = count_real_line_breaks(item.original_lines_with_placeholders or item.original_lines)
     placeholder_lines = translation_lines_with_placeholders or translation_lines
     translation_real_break_count = count_real_line_breaks(placeholder_lines)
     if original_real_break_count != translation_real_break_count:
@@ -90,7 +84,9 @@ def collect_translation_text_structure_errors(
             f"译文真实换行数量不一致（原文 {original_real_break_count} 个，译文 {translation_real_break_count} 个）"
         )
 
-    original_literal_break_count = count_literal_line_breaks(item.original_lines_with_placeholders or item.original_lines)
+    original_literal_break_count = count_literal_line_breaks(
+        item.original_lines_with_placeholders or item.original_lines
+    )
     translation_literal_break_count = count_literal_line_breaks(placeholder_lines)
     if original_literal_break_count != translation_literal_break_count:
         errors.append(
@@ -156,17 +152,12 @@ def _collect_unexpected_empty_line_errors(
     """原文没有对应空行时，拒绝保存模型生成的局部空行。"""
     original_empty_count = sum(1 for line in item.original_lines if not line.strip())
     translation_empty_line_numbers = [
-        line_number
-        for line_number, line in enumerate(translation_lines, start=1)
-        if not line.strip()
+        line_number for line_number, line in enumerate(translation_lines, start=1) if not line.strip()
     ]
     if not translation_empty_line_numbers:
         return []
     if original_empty_count == 0:
-        joined_numbers = "、".join(
-            str(line_number)
-            for line_number in translation_empty_line_numbers
-        )
+        joined_numbers = "、".join(str(line_number) for line_number in translation_empty_line_numbers)
         return [f"原文没有空行，但译文第 {joined_numbers} 行是空行"]
     if len(translation_empty_line_numbers) > original_empty_count:
         return [
@@ -219,10 +210,7 @@ def _collect_unexpected_escape_fragment_errors(
 
 def _is_index_inside_control_span(*, index: int, spans: list[ControlSequenceSpan]) -> bool:
     """判断字符位置是否落在已识别的控制符保护范围内。"""
-    return any(
-        span.start_index <= index < span.end_index
-        for span in spans
-    )
+    return any(span.start_index <= index < span.end_index for span in spans)
 
 
 def _is_index_inside_raw_candidate(
@@ -231,10 +219,7 @@ def _is_index_inside_raw_candidate(
     candidates: list[RawControlSequenceCandidate],
 ) -> bool:
     """判断字符位置是否落在未保护但可识别的疑似控制符范围内。"""
-    return any(
-        candidate.start_index <= index < candidate.end_index
-        for candidate in candidates
-    )
+    return any(candidate.start_index <= index < candidate.end_index for candidate in candidates)
 
 
 def _format_unexpected_escape_fragment_error(*, line_number: int, line: str, index: int) -> str:
@@ -249,18 +234,12 @@ def count_real_line_breaks(lines: list[str]) -> int:
     """统计字段内容中的真实换行数量。"""
     if not lines:
         return 0
-    return "\n".join(lines).count("\n") + sum(
-        line.count(REAL_LINE_BREAK_PLACEHOLDER)
-        for line in lines
-    )
+    return "\n".join(lines).count("\n") + sum(line.count(REAL_LINE_BREAK_PLACEHOLDER) for line in lines)
 
 
 def count_literal_line_breaks(lines: list[str]) -> int:
     """统计字段内容中的字面量换行标记数量。"""
-    return sum(
-        line.count(LITERAL_LINE_BREAK_MARKER) + line.count(LITERAL_LINE_BREAK_PLACEHOLDER)
-        for line in lines
-    )
+    return sum(line.count(LITERAL_LINE_BREAK_MARKER) + line.count(LITERAL_LINE_BREAK_PLACEHOLDER) for line in lines)
 
 
 __all__: list[str] = [

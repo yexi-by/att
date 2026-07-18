@@ -5,9 +5,18 @@ from fnmatch import fnmatchcase
 
 from app.native_quality import collect_native_note_tag_sources
 from app.rmmz.schema import MAP_PATTERN, PLUGINS_FILE_NAME, GameData
-from app.rmmz.text_rules import ensure_json_object, ensure_json_string_list
+from app.rmmz.text_rules import ensure_json_array, ensure_json_object, ensure_json_string_list
 
 MAP_NOTE_FILE_PATTERN = "Map*.json"
+
+
+@dataclass(frozen=True, slots=True)
+class NoteTagMatchFact:
+    """原生 Note 扫描器返回的可复用标签匹配事实。"""
+
+    tag_name: str
+    value: str
+    has_value: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +27,7 @@ class NoteTagSource:
     owner_path: tuple[str, ...]
     note_text: str
     location_prefix: str
+    matches: tuple[NoteTagMatchFact, ...]
 
 
 def collect_note_tag_sources(game_data: GameData, file_pattern: str | None = None) -> list[NoteTagSource]:
@@ -31,6 +41,21 @@ def collect_note_tag_sources(game_data: GameData, file_pattern: str | None = Non
         location_prefix = source.get("location_prefix")
         if not isinstance(file_name, str) or not isinstance(note_text, str) or not isinstance(location_prefix, str):
             raise TypeError(f"note_sources[{index}] 字段类型无效")
+        matches: list[NoteTagMatchFact] = []
+        for match_index, raw_match in enumerate(ensure_json_array(source["matches"], f"note_sources[{index}].matches")):
+            match = ensure_json_object(raw_match, f"note_sources[{index}].matches[{match_index}]")
+            tag_name = match.get("tag_name")
+            value = match.get("value")
+            has_value = match.get("has_value")
+            if not isinstance(tag_name, str) or not isinstance(value, str) or not isinstance(has_value, bool):
+                raise TypeError(f"note_sources[{index}].matches[{match_index}] 字段类型无效")
+            matches.append(
+                NoteTagMatchFact(
+                    tag_name=tag_name,
+                    value=value,
+                    has_value=has_value,
+                )
+            )
         if file_pattern is not None and not note_file_pattern_matches(file_name=file_name, file_pattern=file_pattern):
             continue
         sources.append(
@@ -39,6 +64,7 @@ def collect_note_tag_sources(game_data: GameData, file_pattern: str | None = Non
                 owner_path=tuple(ensure_json_string_list(source["owner_path"], f"note_sources[{index}].owner_path")),
                 note_text=note_text,
                 location_prefix=location_prefix,
+                matches=tuple(matches),
             )
         )
     return sources
@@ -77,6 +103,7 @@ def _iter_data_file_names(*, game_data: GameData, file_pattern: str | None) -> l
 
 __all__: list[str] = [
     "MAP_NOTE_FILE_PATTERN",
+    "NoteTagMatchFact",
     "NoteTagSource",
     "candidate_file_pattern",
     "collect_note_tag_sources",

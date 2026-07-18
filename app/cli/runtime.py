@@ -99,7 +99,9 @@ def ensure_text_translation_success(summary: TextTranslationSummary) -> None:
     if summary.is_blocked:
         raise CliBusinessError(f"正文翻译不能继续：{summary.blocked_reason}")
     if summary.has_errors:
-        raise CliBusinessError(f"正文翻译产生错误条目，已停止后续流程：成功 {summary.success_count} 条，失败 {summary.error_count} 条")
+        raise CliBusinessError(
+            f"正文翻译产生错误条目，已停止后续流程：成功 {summary.success_count} 条，失败 {summary.error_count} 条"
+        )
 
 
 def ensure_text_translation_not_blocked(summary: TextTranslationSummary) -> None:
@@ -222,6 +224,7 @@ def build_setting_overrides(args: argparse.Namespace) -> SettingOverrides:
             "residual_escape_sequence_pattern",
         ),
     )
+
 
 __all__ = [
     "HandlerSession",

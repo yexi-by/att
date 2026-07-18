@@ -1,26 +1,21 @@
-"""
-正文翻译异步调度模块。
-
-该层负责并发调度、限流和把模型结果交给校验器。数据库写入和日志渲染由应用层处理。
-"""
-
-import asyncio
-from collections.abc import AsyncIterator
+"""正文翻译运行控制器的配置门面。"""
 
 from app.config import Setting
-from app.rmmz.schema import TranslationErrorItem, TranslationItem
-from app.llm import LLMRequestFailure
 from app.llm.handler import LLMHandler
 from app.rmmz.text_rules import TextRules
 from app.source_residual import SourceResidualRuleSet
 
-from .batch import TranslationBatch
-from .retry import request_with_recoverable_retry
-from .verify import verify_translation_batch
+from .run_controller import (
+    ExecuteBatch,
+    PersistBatch,
+    SizedBatchIterable,
+    TranslationRunController,
+    TranslationRunResult,
+)
 
 
 class TextTranslation:
-    """正文翻译异步调度服务。"""
+    """根据项目配置创建并运行单一正文翻译 Controller。"""
 
     def __init__(
         self,
@@ -28,202 +23,54 @@ class TextTranslation:
         text_rules: TextRules,
         source_residual_rule_set: SourceResidualRuleSet | None = None,
     ) -> None:
-        """初始化正文翻译调度服务。"""
+        """保存正文翻译运行需要的当前配置。"""
         self.setting: Setting = setting
         self.text_rules: TextRules = text_rules
         self.source_residual_rule_set: SourceResidualRuleSet | None = source_residual_rule_set
-        self.right_queue: asyncio.Queue[list[TranslationItem] | None] | None = None
-        self.error_queue: asyncio.Queue[list[TranslationErrorItem] | None] | None = None
-        self._runner_task: asyncio.Task[None] | None = None
-        self.runner_error: Exception | None = None
 
-    def start_translation(
+    def create_run_controller(
         self,
         *,
         llm_handler: LLMHandler,
-        batches: list[TranslationBatch],
-    ) -> None:
-        """启动正文翻译后台并发执行流程。"""
-        if self._runner_task is not None:
-            raise RuntimeError("当前 TextTranslation 实例已经启动过翻译任务，请重新创建实例")
-
-        self.right_queue = asyncio.Queue()
-        self.error_queue = asyncio.Queue()
-        self.runner_error = None
-        self._runner_task = asyncio.create_task(
-            self._run_translation(llm_handler=llm_handler, batches=batches)
+        execute_batch: ExecuteBatch | None = None,
+    ) -> TranslationRunController:
+        """创建一次运行专用的 Controller。"""
+        task_setting = self.setting.text_translation
+        return TranslationRunController(
+            llm_handler=llm_handler,
+            model=self.setting.llm.model,
+            worker_count=task_setting.worker_count,
+            retry_count=task_setting.retry_count,
+            retry_delay=task_setting.retry_delay,
+            rpm=task_setting.rpm,
+            text_rules=self.text_rules,
+            source_residual_rule_set=self.source_residual_rule_set,
+            execute_batch=execute_batch,
         )
 
-    async def iter_right_items(self) -> AsyncIterator[list[TranslationItem]]:
-        """持续产出后台验证通过的翻译条目。"""
-        if self.right_queue is None:
-            raise RuntimeError("请先调用 start_translation() 启动正文翻译")
-
-        while True:
-            items = await self.right_queue.get()
-            if items is None:
-                break
-            yield items
-
-        if self.runner_error is not None:
-            raise self.runner_error
-
-    async def iter_error_items(self) -> AsyncIterator[list[TranslationErrorItem]]:
-        """持续产出后台验证失败的翻译条目。"""
-        if self.error_queue is None:
-            raise RuntimeError("请先调用 start_translation() 启动正文翻译")
-
-        while True:
-            items = await self.error_queue.get()
-            if items is None:
-                break
-            yield items
-
-        if self.runner_error is not None:
-            raise self.runner_error
-
-    async def stop(self) -> None:
-        """取消后台翻译任务，用于超时或用户中断时保存已有结果。"""
-        if self._runner_task is None or self._runner_task.done():
-            return
-        _ = self._runner_task.cancel()
-        _ = await asyncio.gather(self._runner_task, return_exceptions=True)
-
-    async def _run_translation(
+    async def run(
         self,
         *,
         llm_handler: LLMHandler,
-        batches: list[TranslationBatch],
-    ) -> None:
-        """管理并发翻译的核心调度器。"""
-        if self.right_queue is None or self.error_queue is None:
-            raise RuntimeError("正文翻译队列未初始化")
-        right_queue = self.right_queue
-        error_queue = self.error_queue
-
-        text_task_setting = self.setting.text_translation
-        text_llm_setting = self.setting.llm
-        worker_count = min(text_task_setting.worker_count, max(len(batches), 1))
-        rpm = text_task_setting.rpm
-        stop_event = asyncio.Event()
-
-        task_queue: asyncio.Queue[TranslationBatch | None] = asyncio.Queue()
-        for batch in batches:
-            await task_queue.put(batch)
-        for _ in range(worker_count):
-            await task_queue.put(None)
-
-        token_bucket: asyncio.Queue[int] | None = None
-        if rpm is not None:
-            token_bucket = asyncio.Queue(maxsize=1)
-
-        try:
-            try:
-                async with asyncio.TaskGroup() as task_group:
-                    if token_bucket is not None and rpm is not None:
-                        _ = task_group.create_task(
-                            self._create_token_bucket(
-                                token_bucket=token_bucket,
-                                rpm=rpm,
-                                stop_event=stop_event,
-                            )
-                        )
-
-                    for _ in range(worker_count):
-                        _ = task_group.create_task(
-                            self._worker(
-                                task_queue=task_queue,
-                                right_queue=right_queue,
-                                error_queue=error_queue,
-                                llm_handler=llm_handler,
-                                model=text_llm_setting.model,
-                                retry_count=text_task_setting.retry_count,
-                                retry_delay=text_task_setting.retry_delay,
-                                token_bucket=token_bucket,
-                            )
-                        )
-
-                    _ = task_group.create_task(
-                        self._wait_task_queue_done(task_queue=task_queue, stop_event=stop_event)
-                    )
-            except* LLMRequestFailure as group:
-                self.runner_error = group.exceptions[0]
-            except* Exception as group:
-                self.runner_error = group.exceptions[0]
-        finally:
-            stop_event.set()
-            await right_queue.put(None)
-            await error_queue.put(None)
-
-    async def _worker(
-        self,
-        *,
-        task_queue: asyncio.Queue[TranslationBatch | None],
-        right_queue: asyncio.Queue[list[TranslationItem] | None],
-        error_queue: asyncio.Queue[list[TranslationErrorItem] | None],
-        llm_handler: LLMHandler,
-        model: str,
-        retry_count: int,
-        retry_delay: int,
-        token_bucket: asyncio.Queue[int] | None,
-    ) -> None:
-        """持续消费正文翻译批次。"""
-        while True:
-            batch = await task_queue.get()
-            try:
-                if batch is None:
-                    return
-
-                if token_bucket is not None:
-                    _ = await token_bucket.get()
-
-                ai_result = await request_with_recoverable_retry(
-                    llm_handler=llm_handler,
-                    model=model,
-                    messages=batch.messages,
-                    retry_count=retry_count,
-                    retry_delay=retry_delay,
-                    task_label="正文翻译",
-                )
-                await verify_translation_batch(
-                    ai_result=ai_result,
-                    items=batch.items,
-                    right_queue=right_queue,
-                    error_queue=error_queue,
-                    text_rules=self.text_rules,
-                    source_residual_rule_set=self.source_residual_rule_set,
-                )
-            finally:
-                task_queue.task_done()
-
-    async def _wait_task_queue_done(
-        self,
-        *,
-        task_queue: asyncio.Queue[TranslationBatch | None],
-        stop_event: asyncio.Event,
-    ) -> None:
-        """等待任务队列消费完成，并通知限流协程退出。"""
-        await task_queue.join()
-        stop_event.set()
-
-    async def _create_token_bucket(
-        self,
-        *,
-        token_bucket: asyncio.Queue[int],
-        rpm: int,
-        stop_event: asyncio.Event,
-    ) -> None:
-        """按 RPM 节奏持续补充请求令牌。"""
-        while not token_bucket.full():
-            token_bucket.put_nowait(1)
-
-        interval = 60.0 / rpm
-        while not stop_event.is_set():
-            try:
-                _ = await asyncio.wait_for(stop_event.wait(), timeout=interval)
-            except asyncio.TimeoutError:
-                if not token_bucket.full():
-                    token_bucket.put_nowait(1)
+        batches: SizedBatchIterable,
+        persist_batch: PersistBatch,
+        max_batches: int | None = None,
+        time_limit_seconds: float | None = None,
+        stop_on_error_rate: float | None = None,
+        execute_batch: ExecuteBatch | None = None,
+    ) -> TranslationRunResult:
+        """使用当前配置运行全部批次并返回结构化结果。"""
+        controller = self.create_run_controller(
+            llm_handler=llm_handler,
+            execute_batch=execute_batch,
+        )
+        return await controller.run(
+            batches,
+            persist_batch=persist_batch,
+            max_batches=max_batches,
+            time_limit_seconds=time_limit_seconds,
+            stop_on_error_rate=stop_on_error_rate,
+        )
 
 
 __all__: list[str] = ["TextTranslation"]

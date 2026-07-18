@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import platform
 import json
+import platform
 import re
 import shutil
-import sys
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from pathlib import Path
@@ -30,15 +29,30 @@ from app.config import (
     load_structured_placeholder_rules_text,
 )
 from app.config.environment import load_environment_overrides
+from app.event_command_text import (
+    EventCommandTextExtraction,
+    build_event_command_rule_records_from_import,
+    export_event_commands_json_file,
+    parse_event_command_rule_import_text,
+    resolve_event_command_codes,
+)
+from app.game_analysis import GameAnalysisContext
 from app.language import DEFAULT_SOURCE_LANGUAGE, SourceLanguage
 from app.llm import ChatMessage, LLMHandler
 from app.native_quality import (
-    NativeQualityDetails,
     collect_native_quality_details,
     collect_native_write_protocol_details,
     native_thread_count,
 )
+from app.note_tag_text import (
+    NoteTagTextExtraction,
+    build_note_tag_rule_records_from_import,
+    export_note_tag_candidates_file,
+    parse_note_tag_rule_import_text,
+)
+from app.note_tag_text.sources import note_file_pattern_matches
 from app.persistence import GameRegistry, TargetGameSession, ensure_db_directory
+from app.persistence.repository import current_timestamp_text
 from app.plugin_text import (
     PluginTextExtraction,
     build_plugin_rule_records_from_import,
@@ -48,23 +62,26 @@ from app.plugin_text import (
     parse_plugin_rule_import_text,
 )
 from app.rmmz.control_codes import (
-    ControlSequenceSpan,
-    CustomPlaceholderRule,
     REAL_LINE_BREAK_MARKER,
     REAL_LINE_BREAK_PLACEHOLDER,
+    ControlSequenceSpan,
+    CustomPlaceholderRule,
     StructuredPlaceholderRule,
 )
+from app.rmmz.game_file_view import GameFileView
+from app.rmmz.json_types import coerce_json_value, ensure_json_array, ensure_json_object, ensure_json_string_list
+from app.rmmz.loader import load_active_runtime_game_data, load_game_data_for_view
 from app.rmmz.placeholder_mapping import (
     OriginalPlaceholderQueues,
     build_original_placeholder_queues,
     consume_original_placeholder,
 )
 from app.rmmz.schema import (
-    GameData,
+    PLUGINS_FILE_NAME,
     EventCommandTextRuleRecord,
+    GameData,
     LlmFailureRecord,
     NoteTagTextRuleRecord,
-    PLUGINS_FILE_NAME,
     PlaceholderRuleRecord,
     PluginTextRuleRecord,
     SourceResidualRuleRecord,
@@ -73,28 +90,18 @@ from app.rmmz.schema import (
     TranslationErrorItem,
     TranslationItem,
 )
-from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules
-from app.rmmz.text_protocol import normalize_visible_text_for_extraction
-from app.rmmz.json_types import coerce_json_value, ensure_json_array, ensure_json_object, ensure_json_string_list
-from app.rmmz.game_file_view import GameFileView
-from app.rmmz.loader import load_active_runtime_game_data, load_game_data_for_view
-from app.runtime_paths import resolve_app_path
 from app.rmmz.text_layout import (
     normalize_translated_wrapping_punctuation,
     split_overwide_lines,
 )
-from app.translation.text_structure import (
-    count_literal_line_breaks,
-    count_real_line_breaks,
-    validate_translation_text_structure,
-)
-from app.utils.config_loader_utils import load_setting, resolve_setting_path
-from app.event_command_text import (
-    EventCommandTextExtraction,
-    build_event_command_rule_records_from_import,
-    export_event_commands_json_file,
-    parse_event_command_rule_import_text,
-    resolve_event_command_codes,
+from app.rmmz.text_protocol import normalize_visible_text_for_extraction
+from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules
+from app.runtime_paths import resolve_app_path
+from app.source_residual import (
+    SourceResidualRuleSet,
+    build_source_residual_rule_records_from_import,
+    check_source_residual_for_item,
+    parse_source_residual_rule_import_text,
 )
 from app.terminology import (
     TerminologyCategory,
@@ -106,27 +113,18 @@ from app.terminology import (
     load_terminology_registry,
 )
 from app.terminology.files import write_field_terms_json, write_glossary_json
-from app.note_tag_text import (
-    NoteTagTextExtraction,
-    build_note_tag_rule_records_from_import,
-    export_note_tag_candidates_file,
-    parse_note_tag_rule_import_text,
-)
-from app.note_tag_text.sources import note_file_pattern_matches
-from app.persistence.repository import current_timestamp_text
-from app.source_residual import (
-    SourceResidualRuleSet,
-    build_source_residual_rule_records_from_import,
-    check_source_residual_for_item,
-    parse_source_residual_rule_import_text,
-)
 from app.text_scope import (
     TextScopeEntry,
     TextScopeResult,
-    TextScopeService,
     collect_translation_data_paths,
     read_fresh_plugin_text_rules,
 )
+from app.translation.text_structure import (
+    count_literal_line_breaks,
+    count_real_line_breaks,
+    validate_translation_text_structure,
+)
+from app.utils.config_loader_utils import load_setting, resolve_setting_path
 
 type LlmCheckFunc = Callable[[LLMHandler, str], Awaitable[None]]
 type QualityProgressCallbacks = tuple[Callable[[int, int], None], Callable[[int], None], Callable[[str], None]]
@@ -179,6 +177,20 @@ class AgentServiceContext(Protocol):
         text_rules: TextRules,
     ) -> dict[str, TranslationData]:
         """按当前规则提取本轮可处理文本。"""
+        ...
+
+    async def _build_game_analysis_context(
+        self,
+        *,
+        session: TargetGameSession,
+        game_data: GameData,
+        text_rules: TextRules,
+        translated_items: list[TranslationItem] | None = None,
+        placeholder_rules: list[PlaceholderRuleRecord] | None = None,
+        structured_placeholder_rules: list[StructuredPlaceholderRuleRecord] | None = None,
+        include_write_probe: bool = False,
+    ) -> GameAnalysisContext:
+        """一次建立当前命令共享的游戏分析事实。"""
         ...
 
     async def _build_source_residual_rule_records(
@@ -245,6 +257,7 @@ class AgentServiceContext(Protocol):
         game_title: str | None,
         custom_placeholder_rules_text: str | None,
         sample_texts: Sequence[str],
+        analysis_context: GameAnalysisContext | None = None,
     ) -> AgentReport:
         """校验自定义占位符规则。"""
         ...
@@ -373,56 +386,6 @@ async def run_default_llm_check(llm_handler: LLMHandler, model: str) -> None:
     )
 
 
-def collect_agent_service_native_quality_details(
-    *,
-    items: list[TranslationItem],
-    text_rules: TextRules,
-    source_residual_rules: list[SourceResidualRuleRecord],
-) -> NativeQualityDetails:
-    """读取服务门面上的可替换 Rust 质检函数并执行。"""
-    service_module = sys.modules.get("app.agent_toolkit.service")
-    if service_module is not None:
-        candidate = cast(object, service_module.__dict__.get("collect_native_quality_details"))
-        if candidate is not None and candidate is not collect_native_quality_details and callable(candidate):
-            # monkeypatch 注入来自测试或外部诊断边界，只能在调用前收窄为同签名函数。
-            native_quality_func = cast(Callable[..., NativeQualityDetails], candidate)
-            return native_quality_func(
-                items=items,
-                text_rules=text_rules,
-                source_residual_rules=source_residual_rules,
-            )
-    return collect_native_quality_details(
-        items=items,
-        text_rules=text_rules,
-        source_residual_rules=source_residual_rules,
-    )
-
-
-def collect_agent_service_native_write_protocol_details(
-    *,
-    game_data: JsonObject,
-    plugins_js: JsonArray,
-    items: list[TranslationItem],
-) -> JsonArray:
-    """读取服务门面上的可替换写入协议检查函数并执行。"""
-    service_module = sys.modules.get("app.agent_toolkit.service")
-    if service_module is not None:
-        candidate = cast(object, service_module.__dict__.get("collect_native_write_protocol_details"))
-        if candidate is not None and candidate is not collect_native_write_protocol_details and callable(candidate):
-            # monkeypatch 注入来自测试或外部诊断边界，只能在调用前收窄为同签名函数。
-            write_protocol_func = cast(Callable[..., JsonArray], candidate)
-            return write_protocol_func(
-                game_data=game_data,
-                plugins_js=plugins_js,
-                items=items,
-            )
-    return collect_native_write_protocol_details(
-        game_data=game_data,
-        plugins_js=plugins_js,
-        items=items,
-    )
-
-
 def _append_check(details: JsonObject, name: str, status: str) -> None:
     """把检查项追加到报告明细。"""
     checks_value = details.get("checks")
@@ -436,7 +399,7 @@ def _append_check(details: JsonObject, name: str, status: str) -> None:
 
 
 COMMON_ESCAPE_SAMPLES: dict[str, str] = {
-    "\\\"": "裸 \\\" 双引号转义",
+    '\\"': '裸 \\" 双引号转义',
     "\\'": "裸 \\' 单引号转义",
     "\\/": "裸 \\/ 斜杠转义",
     "\\?": "裸 \\? 问号转义",
@@ -510,8 +473,7 @@ def _build_unprotected_control_warnings(
         return []
 
     formatted_candidates = "；".join(
-        f"{candidate} ({_format_code_points(candidate)})"
-        for candidate in suspicious_candidates
+        f"{candidate} ({_format_code_points(candidate)})" for candidate in suspicious_candidates
     )
     return [
         issue(
@@ -689,8 +651,7 @@ def _event_command_rule_records_to_import_json(records: Sequence[EventCommandTex
         specs.append(
             {
                 "match": {
-                    str(parameter_filter.index): parameter_filter.value
-                    for parameter_filter in record.parameter_filters
+                    str(parameter_filter.index): parameter_filter.value for parameter_filter in record.parameter_filters
                 },
                 "paths": _string_lines_to_json_array(record.path_templates),
             }
@@ -705,10 +666,7 @@ def _event_rule_filter_sort_key(record: EventCommandTextRuleRecord) -> tuple[tup
 
 def _placeholder_rule_records_to_import_json(records: Sequence[PlaceholderRuleRecord]) -> JsonObject:
     """把数据库占位符规则还原为外部 Agent 可编辑的导入 JSON。"""
-    return {
-        record.pattern_text: record.placeholder_template
-        for record in records
-    }
+    return {record.pattern_text: record.placeholder_template for record in records}
 
 
 def _structured_placeholder_rule_records_to_import_json(
@@ -757,11 +715,7 @@ async def _read_reset_translation_location_paths(input_path: Path) -> list[str]:
     location_paths = ensure_json_string_list(raw_paths, "reset-translations.location_paths")
     if not location_paths:
         raise ValueError("location_paths 不能为空")
-    duplicate_paths = sorted(
-        path
-        for path, count in Counter(location_paths).items()
-        if count > 1
-    )
+    duplicate_paths = sorted(path for path, count in Counter(location_paths).items() if count > 1)
     if duplicate_paths:
         joined_paths = "、".join(duplicate_paths)
         raise ValueError(f"location_paths 不得重复: {joined_paths}")
@@ -857,7 +811,13 @@ def _collect_quality_fix_problem_paths(
     location_paths: list[str] = []
     for item in quality_error_items:
         _append_unique_active_path(location_paths, item.location_path, active_paths)
-    for details in (residual_details, text_structure_details, placeholder_details, overwide_details, write_back_protocol_details):
+    for details in (
+        residual_details,
+        text_structure_details,
+        placeholder_details,
+        overwide_details,
+        write_back_protocol_details,
+    ):
         for location_path in _location_paths_from_quality_details(details):
             _append_unique_active_path(location_paths, location_path, active_paths)
     return location_paths
@@ -978,11 +938,7 @@ def _resolve_quality_fix_translation_lines(
 
 def _count_active_quality_details(details: JsonArray, active_paths: set[str]) -> int:
     """统计属于当前提取范围的质量明细数量。"""
-    return sum(
-        1
-        for location_path in _location_paths_from_quality_details(details)
-        if location_path in active_paths
-    )
+    return sum(1 for location_path in _location_paths_from_quality_details(details) if location_path in active_paths)
 
 
 def _preview_placeholder_sample(text_rules: TextRules, sample_text: str) -> JsonObject:
@@ -996,10 +952,7 @@ def _preview_placeholder_sample(text_rules: TextRules, sample_text: str) -> Json
     item.translation_lines_with_placeholders = list(item.original_lines_with_placeholders)
     item.verify_placeholders(text_rules)
     item.restore_placeholders()
-    placeholder_map: JsonObject = {
-        placeholder: original
-        for placeholder, original in item.placeholder_map.items()
-    }
+    placeholder_map: JsonObject = {placeholder: original for placeholder, original in item.placeholder_map.items()}
     text_for_model = ""
     if item.original_lines_with_placeholders:
         text_for_model = item.original_lines_with_placeholders[0]
@@ -1050,12 +1003,14 @@ def _build_coverage_report(
         errors.append(issue("write_probe_failed", scope.write_back_probe_error))
 
     if scope.stale_plugin_rules:
-        errors.append(issue("stale_plugin_rules", f"发现 {len(scope.stale_plugin_rules)} 个过期插件规则，请重新导出并导入插件规则"))
+        errors.append(
+            issue(
+                "stale_plugin_rules", f"发现 {len(scope.stale_plugin_rules)} 个过期插件规则，请重新导出并导入插件规则"
+            )
+        )
 
     active_unwritable_items: JsonArray = [
-        entry.to_json_object()
-        for entry in scope.entries
-        if entry.enters_translation and not entry.can_write_back
+        entry.to_json_object() for entry in scope.entries if entry.enters_translation and not entry.can_write_back
     ]
     if active_unwritable_items:
         errors.append(issue("coverage_unwritable", f"发现 {len(active_unwritable_items)} 条当前文本无法写进游戏文件"))
@@ -1070,15 +1025,23 @@ def _build_coverage_report(
             continue
         unwritable_rule_items.append(entry.to_json_object())
     if unwritable_rule_items:
-        errors.append(issue("rule_hits_unwritable", f"发现 {len(unwritable_rule_items)} 条规则命中文本没有进入当前可写范围"))
+        errors.append(
+            issue("rule_hits_unwritable", f"发现 {len(unwritable_rule_items)} 条规则命中文本没有进入当前可写范围")
+        )
 
     missing_translation_paths = sorted(writable_paths - translated_paths)
     if missing_translation_paths:
-        errors.append(issue("coverage_missing_translation", f"存在 {len(missing_translation_paths)} 条当前可写文本还没成功保存译文"))
+        errors.append(
+            issue(
+                "coverage_missing_translation", f"存在 {len(missing_translation_paths)} 条当前可写文本还没成功保存译文"
+            )
+        )
 
     stale_translation_paths = sorted(translated_paths - writable_paths)
     if stale_translation_paths:
-        errors.append(issue("stale_saved_translations", f"发现 {len(stale_translation_paths)} 条已保存译文不在当前可写范围内"))
+        errors.append(
+            issue("stale_saved_translations", f"发现 {len(stale_translation_paths)} 条已保存译文不在当前可写范围内")
+        )
 
     inactive_rule_hits: JsonArray = [
         entry.to_json_object()
@@ -1141,9 +1104,18 @@ def _text_scope_blocking_errors(scope: TextScopeResult) -> list[AgentIssue]:
     if scope.write_back_probe_error:
         errors.append(issue("write_probe_failed", scope.write_back_probe_error))
     if scope.stale_plugin_rules:
-        errors.append(issue("stale_plugin_rules", f"发现 {len(scope.stale_plugin_rules)} 个过期插件规则，请重新导出并导入插件规则"))
+        errors.append(
+            issue(
+                "stale_plugin_rules", f"发现 {len(scope.stale_plugin_rules)} 个过期插件规则，请重新导出并导入插件规则"
+            )
+        )
     if scope.unwritable_entries:
-        errors.append(issue("coverage_unwritable", f"发现 {len(scope.unwritable_entries)} 条当前文本无法写进游戏文件，请先运行 audit-coverage 查看明细"))
+        errors.append(
+            issue(
+                "coverage_unwritable",
+                f"发现 {len(scope.unwritable_entries)} 条当前文本无法写进游戏文件，请先运行 audit-coverage 查看明细",
+            )
+        )
     return errors
 
 
@@ -1261,17 +1233,11 @@ def _iter_json_string_leaves(value: JsonValue) -> Iterable[tuple[list[str | int]
         return
     if isinstance(value, list):
         for index, item in enumerate(value):
-            yield from (
-                ([index, *path_parts], text)
-                for path_parts, text in _iter_json_string_leaves(item)
-            )
+            yield from (([index, *path_parts], text) for path_parts, text in _iter_json_string_leaves(item))
         return
     if isinstance(value, dict):
         for key, item in value.items():
-            yield from (
-                ([key, *path_parts], text)
-                for path_parts, text in _iter_json_string_leaves(item)
-            )
+            yield from (([key, *path_parts], text) for path_parts, text in _iter_json_string_leaves(item))
 
 
 def _line_number_for_structured_text(
@@ -1338,10 +1304,7 @@ def _classify_feedback_occurrences(
         gap_type, gap_label = _feedback_gap_from_scope_entries(matched_entries)
         occurrence_object["gap_type"] = gap_type
         occurrence_object["gap_label"] = gap_label
-        occurrence_object["matching_location_paths"] = [
-            entry.location_path
-            for entry in matched_entries[:10]
-        ]
+        occurrence_object["matching_location_paths"] = [entry.location_path for entry in matched_entries[:10]]
         classified.append(occurrence_object)
     return classified
 
@@ -1360,11 +1323,7 @@ def _count_feedback_gap_types(occurrences: JsonArray) -> Counter[str]:
 
 def _scope_entries_containing_text(*, scope: TextScopeResult, text: str) -> list[TextScopeEntry]:
     """查找统一文本清单中包含反馈原文的结构位置。"""
-    return [
-        entry
-        for entry in scope.entries
-        if any(text in line for line in entry.original_lines)
-    ]
+    return [entry for entry in scope.entries if any(text in line for line in entry.original_lines)]
 
 
 def _feedback_gap_from_scope_entries(entries: list[TextScopeEntry]) -> tuple[str, str]:
@@ -1414,13 +1373,7 @@ async def _collect_plugin_source_text_candidates(js_dir: Path) -> JsonArray:
 
 def _unescape_js_candidate_text(text: str) -> str:
     """只处理候选展示需要的常见 JavaScript 字符串转义。"""
-    return (
-        text.replace(r"\n", "\n")
-        .replace(r"\t", "\t")
-        .replace(r"\'", "'")
-        .replace(r'\"', '"')
-        .replace(r"\\", "\\")
-    )
+    return text.replace(r"\n", "\n").replace(r"\t", "\t").replace(r"\'", "'").replace(r"\"", '"').replace(r"\\", "\\")
 
 
 def _plugin_source_text_structural_flags(text: str) -> JsonArray:
@@ -1442,15 +1395,9 @@ def _current_python_major_minor() -> tuple[int, int]:
     return int(version_parts[0]), int(version_parts[1])
 
 
-CUSTOM_MARKER_WITH_PARAMS_PATTERN: re.Pattern[str] = re.compile(
-    r"^\\(?P<code>[A-Za-z]+)\d*\[[^\]\r\n]+\]$"
-)
-CUSTOM_MARKER_WITHOUT_PARAMS_PATTERN: re.Pattern[str] = re.compile(
-    r"^\\(?P<code>[A-Za-z]+)\d*$"
-)
-JOINED_TEXT_CONTROL_BOUNDARY_PATTERN: re.Pattern[str] = re.compile(
-    r"^\\[A-Za-z]*[a-z][A-Za-z]*$"
-)
+CUSTOM_MARKER_WITH_PARAMS_PATTERN: re.Pattern[str] = re.compile(r"^\\(?P<code>[A-Za-z]+)\d*\[[^\]\r\n]+\]$")
+CUSTOM_MARKER_WITHOUT_PARAMS_PATTERN: re.Pattern[str] = re.compile(r"^\\(?P<code>[A-Za-z]+)\d*$")
+JOINED_TEXT_CONTROL_BOUNDARY_PATTERN: re.Pattern[str] = re.compile(r"^\\[A-Za-z]*[a-z][A-Za-z]*$")
 
 
 def _build_custom_placeholder_rule_draft(
@@ -1459,7 +1406,9 @@ def _build_custom_placeholder_rule_draft(
     """把未覆盖候选折叠成适合 Agent 编辑的规则草稿。"""
     draft_rules: dict[str, str] = {}
     for candidate in candidates:
-        if candidate.standard_covered or candidate.custom_covered:
+        if candidate.covered:
+            continue
+        if candidate.coverage_conflict:
             continue
         if _needs_manual_joined_text_boundary(candidate.marker):
             continue
@@ -1476,9 +1425,7 @@ def _joined_text_boundary_markers(
         {
             candidate.marker
             for candidate in candidates
-            if not candidate.standard_covered
-            and not candidate.custom_covered
-            and _needs_manual_joined_text_boundary(candidate.marker)
+            if not candidate.covered and _needs_manual_joined_text_boundary(candidate.marker)
         },
         key=str.lower,
     )
@@ -1577,17 +1524,18 @@ def _validate_terminology_registry(registry: TerminologyRegistry) -> list[AgentI
     if empty_count:
         warnings.append(issue("terminology_empty_translation", f"字段译名表存在 {empty_count} 个空译名"))
     translated_counter = Counter(
-        value.strip()
-        for entries in category_map.values()
-        for value in entries.values()
-        if value.strip()
+        value.strip() for entries in category_map.values() for value in entries.values() if value.strip()
     )
     duplicate_count = sum(1 for count in translated_counter.values() if count > 1)
     if duplicate_count:
-        warnings.append(issue("terminology_duplicate_translation", f"字段译名表存在 {duplicate_count} 组重复译名，需要确认是否合理"))
+        warnings.append(
+            issue("terminology_duplicate_translation", f"字段译名表存在 {duplicate_count} 组重复译名，需要确认是否合理")
+        )
     variant_mismatch_count = _count_name_variant_mismatches(registry.speaker_names)
     if variant_mismatch_count:
-        warnings.append(issue("terminology_variant_mismatch", f"说话人变体存在 {variant_mismatch_count} 处译名不一致风险"))
+        warnings.append(
+            issue("terminology_variant_mismatch", f"说话人变体存在 {variant_mismatch_count} 处译名不一致风险")
+        )
     return warnings
 
 
@@ -1640,9 +1588,13 @@ def _validate_terminology_registry_shape(
         missing_count = len(set(expected_entries) - set(imported_entries))
         extra_count = len(set(imported_entries) - set(expected_entries))
         if missing_count:
-            errors.append(issue("terminology_missing_terms", f"字段译名表 {category} 缺少 {missing_count} 个当前游戏词条"))
+            errors.append(
+                issue("terminology_missing_terms", f"字段译名表 {category} 缺少 {missing_count} 个当前游戏词条")
+            )
         if extra_count:
-            errors.append(issue("terminology_extra_terms", f"字段译名表 {category} 多出 {extra_count} 个当前游戏不存在的词条"))
+            errors.append(
+                issue("terminology_extra_terms", f"字段译名表 {category} 多出 {extra_count} 个当前游戏不存在的词条")
+            )
 
 
 def _first_original_line_samples(items: Iterable[TranslationItem], limit: int = 5) -> JsonArray:
@@ -1685,9 +1637,8 @@ def _note_tag_item_matches_rule(*, item: TranslationItem, rule_record: NoteTagTe
         return False
     file_name = parts[0]
     tag_name = parts[-1]
-    return (
-        tag_name in rule_record.tag_names
-        and note_file_pattern_matches(file_name=file_name, file_pattern=rule_record.file_name)
+    return tag_name in rule_record.tag_names and note_file_pattern_matches(
+        file_name=file_name, file_pattern=rule_record.file_name
     )
 
 
@@ -1758,8 +1709,7 @@ def _count_protocol_sensitive_translation_items(
     return sum(
         1
         for item in items
-        if item.location_path in active_paths
-        and _is_protocol_sensitive_translation_path(item.location_path)
+        if item.location_path in active_paths and _is_protocol_sensitive_translation_path(item.location_path)
     )
 
 
@@ -1802,6 +1752,7 @@ def _mask_translation_controls(
     placeholder_queues: OriginalPlaceholderQueues,
 ) -> str:
     """把译文中的控制符转换成占位符以便复用数量校验。"""
+
     def replacer(span: ControlSequenceSpan) -> str:
         """把已知控制符还原成对应占位符，未知控制符标记为风险。"""
         placeholder = consume_original_placeholder(
@@ -1915,212 +1866,208 @@ def _string_lines_to_json_array(lines: list[str]) -> JsonArray:
     """把字符串行列表收窄为 JSON 数组。"""
     return [line for line in lines]
 
+
 __all__: list[str] = [
-    'annotations',
-    'platform',
-    'json',
-    're',
-    'shutil',
-    'sys',
-    'Counter',
-    'Awaitable',
-    'Callable',
-    'Iterable',
-    'Sequence',
-    'Path',
-    'cast',
-    'aiofiles',
-    'PlaceholderCandidate',
-    'count_uncovered_candidates',
-    'placeholder_candidates_to_details',
-    'scan_placeholder_candidates',
-    'AgentIssue',
-    'AgentReport',
-    'issue',
-    'resolve_replacement_font_path',
-    'SettingOverrides',
-    'STRUCTURED_PLACEHOLDER_RULES_FILE_NAME',
-    'empty_structured_placeholder_rules_payload',
-    'load_custom_placeholder_rules_text',
-    'load_structured_placeholder_rules_text',
-    'load_environment_overrides',
-    'DEFAULT_SOURCE_LANGUAGE',
-    'SourceLanguage',
-    'ChatMessage',
-    'LLMHandler',
-    'NativeQualityDetails',
-    'collect_native_quality_details',
-    'collect_native_write_protocol_details',
-    'native_thread_count',
-    'GameRegistry',
-    'TargetGameSession',
-    'ensure_db_directory',
-    'PluginTextExtraction',
-    'build_plugin_rule_records_from_import',
-    'collect_plugin_json_string_leaf_candidates',
-    'export_plugins_json_file',
-    'extract_plugin_name',
-    'parse_plugin_rule_import_text',
-    'ControlSequenceSpan',
-    'CustomPlaceholderRule',
-    'StructuredPlaceholderRule',
-    'REAL_LINE_BREAK_MARKER',
-    'REAL_LINE_BREAK_PLACEHOLDER',
-    'GameData',
-    'EventCommandTextRuleRecord',
-    'LlmFailureRecord',
-    'NoteTagTextRuleRecord',
-    'PLUGINS_FILE_NAME',
-    'PlaceholderRuleRecord',
-    'PluginTextRuleRecord',
-    'SourceResidualRuleRecord',
-    'StructuredPlaceholderRuleRecord',
-    'TranslationData',
-    'TranslationErrorItem',
-    'TranslationItem',
-    'JsonArray',
-    'JsonObject',
-    'JsonValue',
-    'TextRules',
-    'normalize_visible_text_for_extraction',
-    'coerce_json_value',
-    'ensure_json_array',
-    'ensure_json_object',
-    'ensure_json_string_list',
-    'GameFileView',
-    'load_active_runtime_game_data',
-    'load_game_data_for_view',
-    'resolve_app_path',
-    'normalize_translated_wrapping_punctuation',
-    'split_overwide_lines',
-    'count_literal_line_breaks',
-    'count_real_line_breaks',
-    'validate_translation_text_structure',
-    'load_setting',
-    'resolve_setting_path',
-    'EventCommandTextExtraction',
-    'build_event_command_rule_records_from_import',
-    'export_event_commands_json_file',
-    'parse_event_command_rule_import_text',
-    'resolve_event_command_codes',
-    'TerminologyCategory',
-    'TerminologyExtraction',
-    'TerminologyGlossary',
-    'TerminologyRegistry',
-    'export_terminology_artifacts',
-    'load_terminology_glossary',
-    'load_terminology_registry',
-    'write_field_terms_json',
-    'write_glossary_json',
-    'NoteTagTextExtraction',
-    'build_note_tag_rule_records_from_import',
-    'export_note_tag_candidates_file',
-    'parse_note_tag_rule_import_text',
-    'note_file_pattern_matches',
-    'current_timestamp_text',
-    'SourceResidualRuleSet',
-    'build_source_residual_rule_records_from_import',
-    'check_source_residual_for_item',
-    'parse_source_residual_rule_import_text',
-    'TextScopeEntry',
-    'TextScopeResult',
-    'TextScopeService',
-    'collect_translation_data_paths',
-    'read_fresh_plugin_text_rules',
-    'LlmCheckFunc',
-    'QualityProgressCallbacks',
-    'AgentServiceContext',
-    '_noop_quality_progress_callbacks',
-    '_noop_set_progress',
-    '_noop_advance_progress',
-    '_noop_set_status',
-    'TERMINOLOGY_SUBTASK_GROUPS',
-    'run_default_llm_check',
-    'collect_agent_service_native_quality_details',
-    'collect_agent_service_native_write_protocol_details',
-    '_append_check',
-    'COMMON_ESCAPE_SAMPLES',
-    'PLAIN_TEXT_RULE_SAMPLES',
-    'SUSPICIOUS_CONTROL_BOUNDARY_CHARS',
-    '_append_placeholder_rule_safety_issues',
-    '_build_unprotected_control_warnings',
-    '_is_suspicious_unprotected_control',
-    '_format_code_points',
-    '_write_json_object',
-    '_write_json_value',
-    '_write_terminology_subtask_files',
-    '_agent_workflow_manifest',
-    '_merge_terminology_registry',
-    '_plugin_rule_records_to_import_json',
-    '_collect_plugin_json_string_leaf_candidate_details',
-    '_note_tag_rule_records_to_import_json',
-    '_event_command_rule_records_to_import_json',
-    '_event_rule_filter_sort_key',
-    '_placeholder_rule_records_to_import_json',
-    '_structured_placeholder_rule_records_to_import_json',
-    '_collect_active_translation_location_paths',
-    '_read_reset_translation_location_paths',
-    '_build_manual_translation_template_entry',
-    '_restore_template_translation_lines',
-    '_build_translation_line_break_count_detail',
-    '_collect_quality_fix_problem_paths',
-    '_build_quality_error_category_counts',
-    '_quality_error_category',
-    '_build_quality_fix_categories_by_path',
-    '_append_quality_detail_categories',
-    '_append_unique_active_path',
-    '_location_paths_from_quality_details',
-    '_resolve_quality_fix_translation_lines',
-    '_count_active_quality_details',
-    '_preview_placeholder_sample',
-    '_placeholder_preview_loses_visible_source_text',
-    '_build_coverage_report',
-    '_validate_source_residual_rule_records',
-    '_coverage_hard_stop_errors',
-    '_text_scope_blocking_errors',
-    '_read_feedback_texts',
-    '_collect_feedback_text_occurrences',
-    '_read_text_for_line_lookup',
-    '_iter_json_string_leaves',
-    '_line_number_for_structured_text',
-    '_format_json_path',
-    '_classify_feedback_occurrences',
-    '_count_feedback_gap_types',
-    '_scope_entries_containing_text',
-    '_feedback_gap_from_scope_entries',
-    'PLUGIN_SOURCE_TEXT_PATTERN',
-    '_collect_plugin_source_text_candidates',
-    '_unescape_js_candidate_text',
-    '_plugin_source_text_structural_flags',
-    '_current_python_major_minor',
-    'CUSTOM_MARKER_WITH_PARAMS_PATTERN',
-    'CUSTOM_MARKER_WITHOUT_PARAMS_PATTERN',
-    'JOINED_TEXT_CONTROL_BOUNDARY_PATTERN',
-    '_build_custom_placeholder_rule_draft',
-    '_joined_text_boundary_markers',
-    '_needs_manual_joined_text_boundary',
-    '_build_joined_text_boundary_warnings',
-    '_draft_custom_placeholder_rule',
-    '_custom_placeholder_template_for_code',
-    '_collect_placeholder_preview_samples',
-    '_collect_unprotected_control_warning_samples',
-    '_validate_terminology_registry',
-    '_collect_terminology_duplicate_translation_samples',
-    '_validate_terminology_registry_shape',
-    '_first_original_line_samples',
-    '_build_rule_metric_detail',
-    '_note_tag_item_matches_rule',
-    '_preview_event_command_write_back',
-    '_collect_write_protocol_unwritable_items',
-    '_json_items_by_location_path',
-    '_build_write_back_probe_lines',
-    '_count_protocol_sensitive_translation_items',
-    '_is_protocol_sensitive_translation_path',
-    '_count_name_variant_mismatches',
-    '_is_path_inside',
-    '_mask_translation_controls',
-    '_prepare_manual_translation_item',
-    '_normalize_manual_translation_lines',
-    '_build_translation_error_quality_detail',
-    '_string_lines_to_json_array',
+    "annotations",
+    "platform",
+    "json",
+    "re",
+    "shutil",
+    "Counter",
+    "Awaitable",
+    "Callable",
+    "Iterable",
+    "Sequence",
+    "Path",
+    "cast",
+    "aiofiles",
+    "PlaceholderCandidate",
+    "count_uncovered_candidates",
+    "placeholder_candidates_to_details",
+    "scan_placeholder_candidates",
+    "AgentIssue",
+    "AgentReport",
+    "issue",
+    "resolve_replacement_font_path",
+    "SettingOverrides",
+    "STRUCTURED_PLACEHOLDER_RULES_FILE_NAME",
+    "empty_structured_placeholder_rules_payload",
+    "load_custom_placeholder_rules_text",
+    "load_structured_placeholder_rules_text",
+    "load_environment_overrides",
+    "DEFAULT_SOURCE_LANGUAGE",
+    "SourceLanguage",
+    "ChatMessage",
+    "LLMHandler",
+    "collect_native_quality_details",
+    "collect_native_write_protocol_details",
+    "native_thread_count",
+    "GameRegistry",
+    "TargetGameSession",
+    "ensure_db_directory",
+    "PluginTextExtraction",
+    "build_plugin_rule_records_from_import",
+    "collect_plugin_json_string_leaf_candidates",
+    "export_plugins_json_file",
+    "extract_plugin_name",
+    "parse_plugin_rule_import_text",
+    "ControlSequenceSpan",
+    "CustomPlaceholderRule",
+    "StructuredPlaceholderRule",
+    "REAL_LINE_BREAK_MARKER",
+    "REAL_LINE_BREAK_PLACEHOLDER",
+    "GameData",
+    "EventCommandTextRuleRecord",
+    "LlmFailureRecord",
+    "NoteTagTextRuleRecord",
+    "PLUGINS_FILE_NAME",
+    "PlaceholderRuleRecord",
+    "PluginTextRuleRecord",
+    "SourceResidualRuleRecord",
+    "StructuredPlaceholderRuleRecord",
+    "TranslationData",
+    "TranslationErrorItem",
+    "TranslationItem",
+    "JsonArray",
+    "JsonObject",
+    "JsonValue",
+    "TextRules",
+    "normalize_visible_text_for_extraction",
+    "coerce_json_value",
+    "ensure_json_array",
+    "ensure_json_object",
+    "ensure_json_string_list",
+    "GameFileView",
+    "load_active_runtime_game_data",
+    "load_game_data_for_view",
+    "resolve_app_path",
+    "normalize_translated_wrapping_punctuation",
+    "split_overwide_lines",
+    "count_literal_line_breaks",
+    "count_real_line_breaks",
+    "validate_translation_text_structure",
+    "load_setting",
+    "resolve_setting_path",
+    "EventCommandTextExtraction",
+    "build_event_command_rule_records_from_import",
+    "export_event_commands_json_file",
+    "parse_event_command_rule_import_text",
+    "resolve_event_command_codes",
+    "TerminologyCategory",
+    "TerminologyExtraction",
+    "TerminologyGlossary",
+    "TerminologyRegistry",
+    "export_terminology_artifacts",
+    "load_terminology_glossary",
+    "load_terminology_registry",
+    "write_field_terms_json",
+    "write_glossary_json",
+    "NoteTagTextExtraction",
+    "build_note_tag_rule_records_from_import",
+    "export_note_tag_candidates_file",
+    "parse_note_tag_rule_import_text",
+    "note_file_pattern_matches",
+    "current_timestamp_text",
+    "SourceResidualRuleSet",
+    "build_source_residual_rule_records_from_import",
+    "check_source_residual_for_item",
+    "parse_source_residual_rule_import_text",
+    "TextScopeEntry",
+    "TextScopeResult",
+    "collect_translation_data_paths",
+    "read_fresh_plugin_text_rules",
+    "LlmCheckFunc",
+    "QualityProgressCallbacks",
+    "AgentServiceContext",
+    "_noop_quality_progress_callbacks",
+    "_noop_set_progress",
+    "_noop_advance_progress",
+    "_noop_set_status",
+    "TERMINOLOGY_SUBTASK_GROUPS",
+    "run_default_llm_check",
+    "_append_check",
+    "COMMON_ESCAPE_SAMPLES",
+    "PLAIN_TEXT_RULE_SAMPLES",
+    "SUSPICIOUS_CONTROL_BOUNDARY_CHARS",
+    "_append_placeholder_rule_safety_issues",
+    "_build_unprotected_control_warnings",
+    "_is_suspicious_unprotected_control",
+    "_format_code_points",
+    "_write_json_object",
+    "_write_json_value",
+    "_write_terminology_subtask_files",
+    "_agent_workflow_manifest",
+    "_merge_terminology_registry",
+    "_plugin_rule_records_to_import_json",
+    "_collect_plugin_json_string_leaf_candidate_details",
+    "_note_tag_rule_records_to_import_json",
+    "_event_command_rule_records_to_import_json",
+    "_event_rule_filter_sort_key",
+    "_placeholder_rule_records_to_import_json",
+    "_structured_placeholder_rule_records_to_import_json",
+    "_collect_active_translation_location_paths",
+    "_read_reset_translation_location_paths",
+    "_build_manual_translation_template_entry",
+    "_restore_template_translation_lines",
+    "_build_translation_line_break_count_detail",
+    "_collect_quality_fix_problem_paths",
+    "_build_quality_error_category_counts",
+    "_quality_error_category",
+    "_build_quality_fix_categories_by_path",
+    "_append_quality_detail_categories",
+    "_append_unique_active_path",
+    "_location_paths_from_quality_details",
+    "_resolve_quality_fix_translation_lines",
+    "_count_active_quality_details",
+    "_preview_placeholder_sample",
+    "_placeholder_preview_loses_visible_source_text",
+    "_build_coverage_report",
+    "_validate_source_residual_rule_records",
+    "_coverage_hard_stop_errors",
+    "_text_scope_blocking_errors",
+    "_read_feedback_texts",
+    "_collect_feedback_text_occurrences",
+    "_read_text_for_line_lookup",
+    "_iter_json_string_leaves",
+    "_line_number_for_structured_text",
+    "_format_json_path",
+    "_classify_feedback_occurrences",
+    "_count_feedback_gap_types",
+    "_scope_entries_containing_text",
+    "_feedback_gap_from_scope_entries",
+    "PLUGIN_SOURCE_TEXT_PATTERN",
+    "_collect_plugin_source_text_candidates",
+    "_unescape_js_candidate_text",
+    "_plugin_source_text_structural_flags",
+    "_current_python_major_minor",
+    "CUSTOM_MARKER_WITH_PARAMS_PATTERN",
+    "CUSTOM_MARKER_WITHOUT_PARAMS_PATTERN",
+    "JOINED_TEXT_CONTROL_BOUNDARY_PATTERN",
+    "_build_custom_placeholder_rule_draft",
+    "_joined_text_boundary_markers",
+    "_needs_manual_joined_text_boundary",
+    "_build_joined_text_boundary_warnings",
+    "_draft_custom_placeholder_rule",
+    "_custom_placeholder_template_for_code",
+    "_collect_placeholder_preview_samples",
+    "_collect_unprotected_control_warning_samples",
+    "_validate_terminology_registry",
+    "_collect_terminology_duplicate_translation_samples",
+    "_validate_terminology_registry_shape",
+    "_first_original_line_samples",
+    "_build_rule_metric_detail",
+    "_note_tag_item_matches_rule",
+    "_preview_event_command_write_back",
+    "_collect_write_protocol_unwritable_items",
+    "_json_items_by_location_path",
+    "_build_write_back_probe_lines",
+    "_count_protocol_sensitive_translation_items",
+    "_is_protocol_sensitive_translation_path",
+    "_count_name_variant_mismatches",
+    "_is_path_inside",
+    "_mask_translation_controls",
+    "_prepare_manual_translation_item",
+    "_normalize_manual_translation_lines",
+    "_build_translation_error_quality_detail",
+    "_string_lines_to_json_array",
 ]

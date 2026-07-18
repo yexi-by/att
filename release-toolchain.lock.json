@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "python": {
+    "version": "3.14.6",
+    "build": "20260623",
+    "target": "x86_64-pc-windows-msvc",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260623/cpython-3.14.6%2B20260623-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+    "sha256": "ec05b628ad749682d06d225780fbc02e7bbb5ce2146c9bd8e74a3659b14b693a"
+  },
+  "uv": "0.11.28",
+  "maturin": "1.13.1",
+  "rust": "1.97.0",
+  "locks": {
+    "uv.lock": "496bcd4e568eb30efb43e874759043cfa7327624bdaebfe66933f2c46f2cb348",
+    "rust/Cargo.lock": "0cc60725239c660ac9262a29ea7177b51b171d000eeea63275c4c16700d619b6"
+  },
+  "actions": {
+    "actions/checkout": "df4cb1c069e1874edd31b4311f1884172cec0e10",
+    "actions/download-artifact": "37930b1c2abaa49bbe596cd826c3c89aef350131",
+    "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "astral-sh/setup-uv": "08807647e7069bb48b6ef5acd8ec9567f424441b",
+    "dtolnay/rust-toolchain": "2c7215f132e9ebf062739d9130488b56d53c060c",
+    "softprops/action-gh-release": "3d0d9888cb7fd7b750713d6e236d1fcb99157228"
+  }
+}

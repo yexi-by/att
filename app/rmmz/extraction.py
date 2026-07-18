@@ -5,23 +5,25 @@
 对白、选项和滚动文本由本模块直接提取。
 """
 
+from collections.abc import Sequence
+
+from app.rmmz.commands import iter_all_commands
 from app.rmmz.game_data import EventCommand
-from app.rmmz.schema import (
-    Code,
-    GameData,
-    MAP_PATTERN,
-    MvVirtualNameboxRuleRecord,
-    SYSTEM_FILE_NAME,
-    TranslationData,
-    TranslationItem,
-)
 from app.rmmz.mv_namebox import (
     MvVirtualNameboxRule,
     parse_mv_virtual_speaker_line,
     runtime_mv_virtual_namebox_rules,
 )
+from app.rmmz.schema import (
+    MAP_PATTERN,
+    SYSTEM_FILE_NAME,
+    Code,
+    GameData,
+    MvVirtualNameboxRuleRecord,
+    TranslationData,
+    TranslationItem,
+)
 from app.rmmz.text_rules import TextRules
-from app.rmmz.commands import iter_all_commands
 
 NARRATION_ROLE = "旁白"
 type CommandListKey = tuple[str | int, ...]
@@ -45,13 +47,23 @@ class DataTextExtraction:
 
     def extract_all_text(self) -> dict[str, TranslationData]:
         """全量提取标准 `data/` 目录中的可翻译文本。"""
+        return self.extract_all_text_from_command_snapshots(list(iter_all_commands(self.game_data)))
+
+    def extract_all_text_from_command_snapshots(
+        self,
+        command_snapshots: Sequence[tuple[Sequence[str | int], str, EventCommand]],
+    ) -> dict[str, TranslationData]:
+        """复用已遍历的事件指令快照提取标准正文。"""
         all_translation_data: dict[str, TranslationData] = {}
-        all_translation_data.update(self._extract_command_text())
+        all_translation_data.update(self._extract_command_text(command_snapshots))
         all_translation_data.update(self._extract_system_text())
         all_translation_data.update(self._extract_base_text())
         return all_translation_data
 
-    def _extract_command_text(self) -> dict[str, TranslationData]:
+    def _extract_command_text(
+        self,
+        command_snapshots: Sequence[tuple[Sequence[str | int], str, EventCommand]],
+    ) -> dict[str, TranslationData]:
         """从地图、公共事件和敌群事件指令中提取文本。"""
         translation_data_map: dict[str, TranslationData] = {}
         pending_scroll_item: TranslationItem | None = None
@@ -66,15 +78,13 @@ class DataTextExtraction:
             nonlocal pending_scroll_last_index
             nonlocal pending_scroll_list_key
             if pending_scroll_item is not None and pending_scroll_file_name is not None:
-                translation_data_map[pending_scroll_file_name].translation_items.append(
-                    pending_scroll_item
-                )
+                translation_data_map[pending_scroll_file_name].translation_items.append(pending_scroll_item)
             pending_scroll_item = None
             pending_scroll_file_name = None
             pending_scroll_list_key = None
             pending_scroll_last_index = None
 
-        for path, display_name, command in iter_all_commands(self.game_data):
+        for path, display_name, command in command_snapshots:
             file_name_value = path[0]
             if not isinstance(file_name_value, str):
                 flush_scroll_item()
@@ -103,14 +113,11 @@ class DataTextExtraction:
             elif command.code == Code.SCROLL_TEXT:
                 list_key = _command_list_key(path)
                 command_index = _command_index(path)
-                if (
-                    pending_scroll_item is not None
-                    and (
-                        pending_scroll_file_name != file_name
-                        or pending_scroll_list_key != list_key
-                        or pending_scroll_last_index is None
-                        or command_index != pending_scroll_last_index + 1
-                    )
+                if pending_scroll_item is not None and (
+                    pending_scroll_file_name != file_name
+                    or pending_scroll_list_key != list_key
+                    or pending_scroll_last_index is None
+                    or command_index != pending_scroll_last_index + 1
                 ):
                     flush_scroll_item()
 
@@ -293,9 +300,7 @@ class DataTextExtraction:
             return
 
         original_lines = [
-            self.text_rules.normalize_extraction_text(item)
-            for item in choices_value
-            if isinstance(item, str)
+            self.text_rules.normalize_extraction_text(item) for item in choices_value if isinstance(item, str)
         ]
         if not self._should_extract_lines(original_lines):
             return
@@ -384,9 +389,7 @@ class DataTextExtraction:
         filtered_map: dict[str, TranslationData] = {}
         for file_name, translation_data in translation_data_map.items():
             filtered_items = [
-                item
-                for item in translation_data.translation_items
-                if self._should_keep_translation_item(item)
+                item for item in translation_data.translation_items if self._should_keep_translation_item(item)
             ]
             if not filtered_items:
                 continue
@@ -400,12 +403,12 @@ class DataTextExtraction:
 __all__: list[str] = ["DataTextExtraction"]
 
 
-def _command_list_key(path: list[str | int]) -> CommandListKey:
+def _command_list_key(path: Sequence[str | int]) -> CommandListKey:
     """返回事件指令所在列表的稳定键。"""
     return tuple(path[:-1])
 
 
-def _command_index(path: list[str | int]) -> int:
+def _command_index(path: Sequence[str | int]) -> int:
     """读取事件指令在当前列表中的下标。"""
     index_value = path[-1]
     if not isinstance(index_value, int):

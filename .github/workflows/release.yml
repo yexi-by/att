@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "发布标签，例如 v0.1.0"
+        description: "已经存在的发布标签，例如 v0.1.15"
         required: true
         type: string
       prerelease:
@@ -22,87 +22,168 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-release:
-    name: Build Windows release
-    runs-on: windows-latest
-    timeout-minutes: 45
+  verify_release:
+    name: Verify Windows portable release
+    runs-on: windows-2025
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      sha: ${{ steps.meta.outputs.sha }}
+      zip_name: ${{ steps.meta.outputs.zip_name }}
+      artifact_name: ${{ steps.meta.outputs.artifact_name }}
+      zip_sha256: ${{ steps.handoff.outputs.zip_sha256 }}
+      pylock_sha256: ${{ steps.handoff.outputs.pylock_sha256 }}
+      manifest_sha256: ${{ steps.handoff.outputs.manifest_sha256 }}
+      sums_sha256: ${{ steps.handoff.outputs.sums_sha256 }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Checkout exact existing tag
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          python-version: "3.14"
+          fetch-depth: 0
+          ref: ${{ format('refs/tags/{0}', github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name) }}
+          persist-credentials: false
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v8.1.0
-        with:
-          enable-cache: true
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Resolve release metadata
+      - name: Resolve and verify release identity
         id: meta
         shell: pwsh
+        env:
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $tag = "${{ inputs.tag }}"
+          if ($env:REQUESTED_TAG -cne 'v0.1.15') {
+            throw "本工作流只允许发布已经存在的 v0.1.15 标签：$env:REQUESTED_TAG"
           }
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            throw "缺少发布标签"
+          $fullTagRef = "refs/tags/$env:REQUESTED_TAG"
+          git show-ref --verify --quiet $fullTagRef
+          if ($LASTEXITCODE -ne 0) { throw "发布标签不存在：$fullTagRef" }
+          $tagSha = (git rev-parse "$fullTagRef^{commit}").Trim().ToLowerInvariant()
+          $headSha = (git rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($tagSha -cne $headSha -or $headSha -notmatch '^[0-9a-f]{40}$') {
+            throw "标签指向 $tagSha，但当前 HEAD 为 $headSha"
           }
-          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "RELEASE_TAG=$env:REQUESTED_TAG" >> $env:GITHUB_ENV
+          "tag=$env:REQUESTED_TAG" >> $env:GITHUB_OUTPUT
+          "version=0.1.15" >> $env:GITHUB_OUTPUT
+          "sha=$headSha" >> $env:GITHUB_OUTPUT
           "zip_name=att-mz-windows-x86_64.zip" >> $env:GITHUB_OUTPUT
+          "artifact_name=att-mz-release-input-$($headSha.Substring(0, 12))" >> $env:GITHUB_OUTPUT
 
-      - name: Install project dependencies
-        shell: pwsh
-        run: uv sync --locked --dev
-
-      - name: Type check
-        shell: pwsh
-        run: uv run basedpyright
-
-      - name: Test
-        shell: pwsh
-        run: uv run pytest
-
-      - name: Rust fmt
-        shell: pwsh
-        run: cargo fmt --manifest-path rust/Cargo.toml -- --check
-
-      - name: Rust clippy
-        shell: pwsh
-        run: cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
-
-      - name: Rust test
-        shell: pwsh
-        run: cargo test --manifest-path rust/Cargo.toml
-
-      - name: Build release zip
-        shell: pwsh
-        run: uv run python scripts/build_release.py --zip-name "${{ steps.meta.outputs.zip_name }}"
-
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v7
+      - name: Set up locked uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          name: ${{ steps.meta.outputs.zip_name }}
-          path: dist/${{ steps.meta.outputs.zip_name }}
+          version: "0.11.28"
+          enable-cache: true
+
+      - name: Set up locked Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: "1.97.0"
+          components: rustfmt, clippy
+
+      - name: Run shared release verification
+        shell: pwsh
+        run: >-
+          & .\scripts\run_release_verification.ps1
+          -ExpectedVersion "${{ steps.meta.outputs.version }}"
+          -ZipName "${{ steps.meta.outputs.zip_name }}"
+
+      - name: Revalidate local tag identity after build
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          $fullTagRef = "refs/tags/$env:RELEASE_TAG"
+          $tagSha = (git rev-parse "$fullTagRef^{commit}").Trim().ToLowerInvariant()
+          $headSha = (git rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($tagSha -cne $env:RELEASE_SHA -or $headSha -cne $env:RELEASE_SHA) {
+            throw "构建后发布身份漂移：expected=$env:RELEASE_SHA tag=$tagSha HEAD=$headSha"
+          }
+
+      - name: Record independently verified handoff hashes
+        id: handoff
+        shell: pwsh
+        env:
+          ZIP_NAME: ${{ steps.meta.outputs.zip_name }}
+        run: |
+          $files = @{
+            zip_sha256 = "dist-a/$env:ZIP_NAME"
+            pylock_sha256 = 'dist-a/pylock.windows-x86_64.toml'
+            manifest_sha256 = 'dist-a/release-manifest.json'
+            sums_sha256 = 'dist-a/SHA256SUMS.txt'
+          }
+          foreach ($entry in $files.GetEnumerator()) {
+            $hash = (Get-FileHash -LiteralPath $entry.Value -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$($entry.Key)=$hash" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Upload verified handoff artifact
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: |
+            dist-a/${{ steps.meta.outputs.zip_name }}
+            dist-a/SHA256SUMS.txt
+            dist-a/pylock.windows-x86_64.toml
+            dist-a/release-manifest.json
           if-no-files-found: error
+          retention-days: 1
 
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v3
+  publish_release:
+    name: Publish already verified release artifact
+    needs: verify_release
+    runs-on: windows-2025
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout the same exact existing tag
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          target_commitish: ${{ github.sha }}
-          name: A.T.T MZ ${{ steps.meta.outputs.tag }}
-          files: dist/${{ steps.meta.outputs.zip_name }}
+          fetch-depth: 0
+          ref: ${{ format('refs/tags/{0}', needs.verify_release.outputs.tag) }}
+          persist-credentials: false
+
+      - name: Download verified handoff artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: ${{ needs.verify_release.outputs.artifact_name }}
+          path: publish-input
+
+      - name: Revalidate artifact, manifest and remote tag
+        shell: pwsh
+        run: >-
+          & .\scripts\verify_release_handoff.ps1
+          -ArtifactRoot .\publish-input
+          -ExpectedTag "${{ needs.verify_release.outputs.tag }}"
+          -ExpectedSha "${{ needs.verify_release.outputs.sha }}"
+          -ExpectedVersion "${{ needs.verify_release.outputs.version }}"
+          -ZipName "${{ needs.verify_release.outputs.zip_name }}"
+          -ExpectedZipSha256 "${{ needs.verify_release.outputs.zip_sha256 }}"
+          -ExpectedPylockSha256 "${{ needs.verify_release.outputs.pylock_sha256 }}"
+          -ExpectedManifestSha256 "${{ needs.verify_release.outputs.manifest_sha256 }}"
+          -ExpectedSumsSha256 "${{ needs.verify_release.outputs.sums_sha256 }}"
+
+      - name: Publish GitHub release without rebuilding
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+        with:
+          tag_name: ${{ needs.verify_release.outputs.tag }}
+          target_commitish: ${{ needs.verify_release.outputs.sha }}
+          name: A.T.T MZ ${{ needs.verify_release.outputs.tag }}
+          body_path: docs/releases/v0.1.15.md
+          files: |
+            publish-input/${{ needs.verify_release.outputs.zip_name }}
+            publish-input/SHA256SUMS.txt
+            publish-input/pylock.windows-x86_64.toml
+            publish-input/release-manifest.json
           draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
           prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
-          generate_release_notes: true
+          generate_release_notes: false

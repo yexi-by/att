@@ -2,25 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from importlib import import_module
-from typing import Protocol, cast
 
-from app.rmmz.text_rules import JsonValue, coerce_json_value, ensure_json_array, ensure_json_object
-
-
-class NativeJavaScriptAstModule(Protocol):
-    """PyO3 扩展暴露给 Python 的 JavaScript AST 接口。"""
-
-    def parse_javascript_string_spans(self, payload_json: str) -> str:
-        """解析 JavaScript 字符串节点范围。"""
-        raise NotImplementedError
-
-    def parse_javascript_string_spans_batch(self, payload_json: str) -> str:
-        """批量解析 JavaScript 字符串节点范围。"""
-        raise NotImplementedError
+from app.native_runtime import invoke_native
+from app.rmmz.text_rules import JsonValue, ensure_json_array, ensure_json_object
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,29 +39,29 @@ class NativeJavaScriptStringSpan:
 class NativeJavaScriptStringScan:
     """Rust AST 字符串节点扫描结果。"""
 
+    source_sha256: str
     has_error: bool
-    spans: list[NativeJavaScriptStringSpan]
+    spans: tuple[NativeJavaScriptStringSpan, ...]
 
 
 def parse_native_javascript_string_spans(source: str) -> NativeJavaScriptStringScan:
     """调用 Rust AST 解析器收集普通字符串节点范围。"""
-    native_module = _load_native_javascript_ast_module()
-    result_text = native_module.parse_javascript_string_spans(
-        json.dumps({"source": source}, ensure_ascii=False)
-    )
     result = ensure_json_object(
-        # json.loads 的返回值来自动态 JSON 边界，立即交给 coerce_json_value 收窄。
-        coerce_json_value(cast(object, json.loads(result_text))),
+        invoke_native("javascript.parse", {"source": source}),
         "native_javascript_ast_result",
     )
-    spans = [
+    spans = tuple(
         _parse_native_span(span, index)
         for index, span in enumerate(ensure_json_array(result["spans"], "native_javascript_ast_result.spans"))
-    ]
+    )
     has_error = result["has_error"]
     if not isinstance(has_error, bool):
         raise TypeError("native_javascript_ast_result.has_error 必须是布尔值")
     return NativeJavaScriptStringScan(
+        source_sha256=_ensure_sha256(
+            result.get("source_sha256"),
+            "native_javascript_ast_result.source_sha256",
+        ),
         has_error=has_error,
         spans=spans,
     )
@@ -85,20 +71,11 @@ def parse_native_javascript_string_spans_batch(
     files: Mapping[str, str],
 ) -> dict[str, NativeJavaScriptStringScan]:
     """批量调用 Rust AST 解析器收集多个源码文件的字符串节点范围。"""
-    native_module = _load_native_javascript_ast_module()
-    result_text = native_module.parse_javascript_string_spans_batch(
-        json.dumps(
-            {
-                "files": [
-                    {"file_name": file_name, "source": source}
-                    for file_name, source in sorted(files.items())
-                ]
-            },
-            ensure_ascii=False,
-        )
-    )
     result = ensure_json_object(
-        coerce_json_value(cast(object, json.loads(result_text))),
+        invoke_native(
+            "javascript.parse_batch",
+            {"files": [{"file_name": file_name, "source": source} for file_name, source in sorted(files.items())]},
+        ),
         "native_javascript_ast_batch_result",
     )
     scans: dict[str, NativeJavaScriptStringScan] = {}
@@ -111,7 +88,7 @@ def parse_native_javascript_string_spans_batch(
         has_error = file_result["has_error"]
         if not isinstance(has_error, bool):
             raise TypeError(f"native_javascript_ast_batch_result.files[{index}].has_error 必须是布尔值")
-        spans = [
+        spans = tuple(
             _parse_native_span(span, span_index)
             for span_index, span in enumerate(
                 ensure_json_array(
@@ -119,8 +96,12 @@ def parse_native_javascript_string_spans_batch(
                     f"native_javascript_ast_batch_result.files[{index}].spans",
                 )
             )
-        ]
+        )
         scans[file_name] = NativeJavaScriptStringScan(
+            source_sha256=_ensure_sha256(
+                file_result.get("source_sha256"),
+                f"native_javascript_ast_batch_result.files[{index}].source_sha256",
+            ),
             has_error=has_error,
             spans=spans,
         )
@@ -129,14 +110,6 @@ def parse_native_javascript_string_spans_batch(
         samples = "、".join(sorted(missing_files)[:5])
         raise RuntimeError(f"批量 JS AST 结果缺少文件: {samples}")
     return scans
-
-
-def _load_native_javascript_ast_module() -> NativeJavaScriptAstModule:
-    """加载 PyO3 扩展，缺失入口时直接报错。"""
-    native_module = import_module("app._native")
-    if not hasattr(native_module, "parse_javascript_string_spans"):
-        raise RuntimeError("Rust 原生扩展缺少 JavaScript AST 解析入口，请重新执行 uv run maturin develop")
-    return cast(NativeJavaScriptAstModule, cast(object, native_module))
 
 
 def _parse_native_span(value: JsonValue, index: int) -> NativeJavaScriptStringSpan:
@@ -189,6 +162,14 @@ def _ensure_string(value: object, label: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{label} 必须是字符串")
     return value
+
+
+def _ensure_sha256(value: object, label: str) -> str:
+    """校验 JSON 字段是 64 位小写十六进制 SHA-256。"""
+    text = _ensure_string(value, label)
+    if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
+        raise TypeError(f"{label} 必须是 64 位小写十六进制 SHA-256")
+    return text
 
 
 def _ensure_int(value: object, label: str) -> int:

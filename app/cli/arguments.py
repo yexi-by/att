@@ -257,8 +257,7 @@ def format_namespace(args: argparse.Namespace) -> str:
     """把命令参数格式化为适合日志记录的摘要。"""
     namespace = cast(dict[str, object], vars(args))
     return ", ".join(
-        f"{key}={format_log_argument_value(key=key, value=value)}"
-        for key, value in sorted(namespace.items())
+        f"{key}={format_log_argument_value(key=key, value=value)}" for key, value in sorted(namespace.items())
     )
 
 
@@ -300,6 +299,7 @@ def format_log_argument_value(*, key: str, value: object) -> object:
     if key in SENSITIVE_OR_VERBOSE_ARGUMENTS and value is not None:
         return "<已省略>"
     return value
+
 
 __all__ = [
     "format_argv",

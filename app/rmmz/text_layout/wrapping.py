@@ -10,7 +10,7 @@ from .protected import collect_protected_spans, find_containing_span
 TRANSLATED_WRAPPING_PUNCTUATION_PAIRS: tuple[tuple[str, str], ...] = (
     ("“", "”"),
     ("‘", "’"),
-    ("\"", "\""),
+    ('"', '"'),
     ("'", "'"),
     ("＂", "＂"),
     ("「", "」"),
@@ -107,11 +107,7 @@ def prepend_continuation_prefix(*, line: str, prefix: str) -> str:
 
 def _has_preserved_wrapping_chars(*, lines: list[str], text_rules: TextRules) -> bool:
     """快速判断源文是否可能需要包裹标点修复。"""
-    wrapping_chars = {
-        char
-        for pair in text_rules.setting.preserve_wrapping_punctuation_pairs
-        for char in pair
-    }
+    wrapping_chars = {char for pair in text_rules.setting.preserve_wrapping_punctuation_pairs for char in pair}
     if not wrapping_chars:
         return False
     return any(char in line for line in lines for char in wrapping_chars)
@@ -211,11 +207,7 @@ def _collect_different_char_wrapping_spans(
         if expected_pair[1] != boundary.char and not allow_mismatched_right:
             continue
         _ = stack.pop()
-        source_pair = (
-            expected_pair
-            if expected_pair[1] == boundary.char
-            else (left_boundary.char, boundary.char)
-        )
+        source_pair = expected_pair if expected_pair[1] == boundary.char else (left_boundary.char, boundary.char)
         spans.append(WrappingSpan(left=left_boundary, right=boundary, pair=source_pair))
     return spans
 
@@ -233,11 +225,7 @@ def _collect_flexible_wrapping_spans(
     for boundary in visible_chars:
         if stack and boundary.char in right_chars:
             left_boundary, expected_pair = stack.pop()
-            span_pair = (
-                expected_pair
-                if expected_pair[1] == boundary.char
-                else (left_boundary.char, boundary.char)
-            )
+            span_pair = expected_pair if expected_pair[1] == boundary.char else (left_boundary.char, boundary.char)
             spans.append(WrappingSpan(left=left_boundary, right=boundary, pair=span_pair))
             continue
         pair = left_to_pair.get(boundary.char)
@@ -305,4 +293,4 @@ def _collect_visible_chars(
 
 def _replace_char_at(*, text: str, index: int, char: str) -> str:
     """替换文本指定下标处的单个字符。"""
-    return f"{text[:index]}{char}{text[index + 1:]}"
+    return f"{text[:index]}{char}{text[index + 1 :]}"

@@ -110,6 +110,8 @@ def apply_setting_overrides(
         "default_command_codes",
         overrides.event_command_default_codes,
     )
+    if overrides.event_command_default_codes is not None:
+        event_command_text["default_command_codes_by_engine"] = {}
 
     write_back = _read_or_create_section(raw_config, "write_back")
     _set_if_present(

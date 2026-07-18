@@ -5,8 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.config import LLM_API_KEY_ENV_NAME, LLM_BASE_URL_ENV_NAME
-from app.config import SettingOverrides
+from app.config import LLM_API_KEY_ENV_NAME, LLM_BASE_URL_ENV_NAME, SettingOverrides
 from app.utils.config_loader_utils import load_setting
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -176,7 +175,7 @@ def test_builtin_prompt_template_can_enable_source_lines_protocol(
 
     assert setting.text_translation.include_source_lines is True
     assert "每个数组元素必须包含 `id`、`role`、`source_lines`、`translation_lines`" in system_prompt
-    assert '`source_lines` 尽量原样复制输入原文，用于人工对照。' in system_prompt
+    assert "`source_lines` 尽量原样复制输入原文，用于人工对照。" in system_prompt
     assert '"source_lines": ["<输入原文>"],' in system_prompt
     assert "{{输出字段列表}}" not in system_prompt
     assert "本轮输出协议补充" not in system_prompt
@@ -292,8 +291,8 @@ request_body_extra = '''
 @pytest.mark.parametrize(
     "request_body_extra_text",
     [
-        'request_body_extra = \'\'\'{"stream": true}\'\'\'',
-        'request_body_extra = \'\'\'{"stream_options": {"include_usage": true}}\'\'\'',
+        "request_body_extra = '''{\"stream\": true}'''",
+        "request_body_extra = '''{\"stream_options\": {\"include_usage\": true}}'''",
     ],
 )
 def test_load_setting_rejects_streaming_llm_request_body_extra(

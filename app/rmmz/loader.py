@@ -13,43 +13,39 @@ from pathlib import Path
 from typing import cast
 
 import aiofiles
-import demjson3
 from pydantic import TypeAdapter
 
+from app.native_plugins import parse_native_plugins_array
+from app.observability.logging import logger
 from app.rmmz.game_data import BaseItem, CommonEvent, MapData, System, Troop
 from app.rmmz.game_file_view import GameFileView
+from app.rmmz.probe import run_dialogue_probe
 from app.rmmz.schema import (
     COMMON_EVENTS_FILE_NAME,
     DATA_DIRECTORY_NAME,
     DATA_ORIGIN_DIRECTORY_NAME,
     FIXED_FILE_NAMES,
-    EngineKind,
-    GameData,
-    GameLayout,
     JS_DIRECTORY_NAME,
     MAP_INFOS_FILE_NAME,
     MAP_PATTERN,
+    PLUGIN_SOURCE_ORIGIN_DIRECTORY_NAME,
     PLUGINS_FILE_NAME,
     PLUGINS_JS_PATTERN,
     PLUGINS_ORIGIN_FILE_NAME,
-    PLUGIN_SOURCE_ORIGIN_DIRECTORY_NAME,
     SYSTEM_FILE_NAME,
     TROOPS_FILE_NAME,
+    EngineKind,
+    GameData,
+    GameLayout,
 )
-from app.rmmz.text_rules import JsonValue, coerce_json_value, ensure_json_object
-from app.rmmz.probe import run_dialogue_probe
-from app.observability.logging import logger
+from app.rmmz.text_rules import JsonValue, ensure_json_object
 
 PACKAGE_FILE_NAME = "package.json"
 WWW_DIRECTORY_NAME = "www"
 RMMZ_CORE_FILE_NAME = "rmmz_core.js"
 RPG_CORE_FILE_NAME = "rpg_core.js"
-ENGINE_NAME_PATTERN: re.Pattern[str] = re.compile(
-    r"RPGMAKER_NAME\s*=\s*['\"](?P<name>MV|MZ)['\"]"
-)
-ENGINE_VERSION_PATTERN: re.Pattern[str] = re.compile(
-    r"RPGMAKER_VERSION\s*=\s*['\"](?P<version>[^'\"]+)['\"]"
-)
+ENGINE_NAME_PATTERN: re.Pattern[str] = re.compile(r"RPGMAKER_NAME\s*=\s*['\"](?P<name>MV|MZ)['\"]")
+ENGINE_VERSION_PATTERN: re.Pattern[str] = re.compile(r"RPGMAKER_VERSION\s*=\s*['\"](?P<version>[^'\"]+)['\"]")
 
 
 async def load_game_data(
@@ -162,12 +158,7 @@ async def _load_game_data(
     )
     _log_skipped_data_files(source_data_dir=source_data_dir, valid_files=valid_files)
 
-    file_contents = await asyncio.gather(
-        *(
-            _read_text_file(file_path)
-            for file_path in valid_files
-        )
-    )
+    file_contents = await asyncio.gather(*(_read_text_file(file_path) for file_path in valid_files))
 
     data: dict[str, JsonValue] = {}
     map_data: dict[str, MapData] = {}
@@ -176,9 +167,7 @@ async def _load_game_data(
     troops: list[Troop | None] | None = None
     base_data: dict[str, list[BaseItem | None]] = {}
 
-    common_events_adapter: TypeAdapter[list[CommonEvent | None]] = TypeAdapter(
-        list[CommonEvent | None]
-    )
+    common_events_adapter: TypeAdapter[list[CommonEvent | None]] = TypeAdapter(list[CommonEvent | None])
     troops_adapter: TypeAdapter[list[Troop | None]] = TypeAdapter(list[Troop | None])
     base_data_adapter: TypeAdapter[list[BaseItem | None]] = TypeAdapter(list[BaseItem | None])
 
@@ -442,11 +431,7 @@ def validate_data_directory_integrity(*, data_dir: Path, role: str) -> None:
     """校验 RPG Maker 标准 data 目录包含完整标准文件和地图文件。"""
     if not data_dir.is_dir():
         raise NotADirectoryError(f"{role}不是目录: {data_dir}")
-    file_names = {
-        file_path.name
-        for file_path in data_dir.iterdir()
-        if file_path.is_file()
-    }
+    file_names = {file_path.name for file_path in data_dir.iterdir() if file_path.is_file()}
     missing_fixed_files = sorted(FIXED_FILE_NAMES.difference(file_names))
     if missing_fixed_files:
         raise FileNotFoundError(
@@ -455,9 +440,7 @@ def validate_data_directory_integrity(*, data_dir: Path, role: str) -> None:
         )
     missing_map_files = collect_missing_map_files_from_map_infos(data_dir=data_dir)
     if missing_map_files:
-        raise FileNotFoundError(
-            f"{role}的 MapInfos.json 引用了缺失地图文件: {', '.join(missing_map_files)}"
-        )
+        raise FileNotFoundError(f"{role}的 MapInfos.json 引用了缺失地图文件: {', '.join(missing_map_files)}")
 
 
 def collect_missing_map_files_from_map_infos(*, data_dir: Path) -> list[str]:
@@ -481,11 +464,7 @@ def collect_missing_map_files_from_map_infos(*, data_dir: Path) -> list[str]:
         if raw_id <= 0:
             continue
         expected_map_names.add(f"Map{raw_id:03d}.json")
-    return sorted(
-        map_name
-        for map_name in expected_map_names
-        if not (data_dir / map_name).is_file()
-    )
+    return sorted(map_name for map_name in expected_map_names if not (data_dir / map_name).is_file())
 
 
 class GameDataManager:
@@ -509,7 +488,9 @@ class GameDataManager:
         )
 
         if has_origin_backup:
-            logger.warning(f"[tag.warning]检测到该游戏已经执行过激活版回写，后续会优先读取完整原始 data 备份[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数据来源 [tag.path]{source_data_dir}[/tag.path] 插件来源 [tag.path]{source_plugins_path}[/tag.path]")
+            logger.warning(
+                f"[tag.warning]检测到该游戏已经执行过激活版回写，后续会优先读取完整原始 data 备份[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数据来源 [tag.path]{source_data_dir}[/tag.path] 插件来源 [tag.path]{source_plugins_path}[/tag.path]"
+            )
 
         self.items[game_title] = game_data
 
@@ -576,9 +557,7 @@ def _log_skipped_data_files(*, source_data_dir: Path, valid_files: list[Path]) -
     for file_path in sorted(source_data_dir.glob("*.json"), key=lambda path: path.name):
         if file_path.name in valid_names:
             continue
-        logger.debug(
-            f"[tag.skip]跳过非标准 data 文件[/tag.skip] [tag.path]{file_path}[/tag.path]"
-        )
+        logger.debug(f"[tag.skip]跳过非标准 data 文件[/tag.skip] [tag.path]{file_path}[/tag.path]")
 
 
 def _decode_json_value(*, content: str, source: Path) -> JsonValue:
@@ -598,10 +577,7 @@ def _parse_plugins_js_text(plugins_content: str) -> list[dict[str, JsonValue]]:
     if match is None:
         raise ValueError("plugins.js 中未找到 `var $plugins = [...]` 标准结构")
 
-    plugins_array_text = match.group(1)
-    json_value = coerce_json_value(demjson3.decode(plugins_array_text))
-    if not isinstance(json_value, list):
-        raise ValueError("plugins.js 中的 `$plugins` 必须是数组")
+    json_value = parse_native_plugins_array(match.group(1))
 
     plugins: list[dict[str, JsonValue]] = []
     for index, plugin in enumerate(json_value):

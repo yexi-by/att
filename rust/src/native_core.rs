@@ -5,16 +5,21 @@
 
 mod controls;
 mod details;
+mod file_hashing;
 mod font_replacement;
 mod javascript_ast;
 mod models;
 mod note_sources;
+mod placeholder_candidates;
 mod placeholders;
+mod plugins;
 mod pool;
 mod quality;
 mod rules;
 mod write_back_plan;
 mod write_protocol;
+
+pub(crate) use file_hashing::FileHashError;
 
 /// 扫描译文质量问题并返回 JSON 明细。
 pub fn scan_quality_impl(payload_json: &str) -> Result<String, String> {
@@ -41,9 +46,14 @@ pub fn collect_note_tag_sources_impl(payload_json: &str) -> Result<String, Strin
     note_sources::collect_note_tag_sources_impl(payload_json)
 }
 
-/// 扫描字体引用替换位置并返回 JSON 变更清单。
-pub fn scan_font_replacements_impl(payload_json: &str) -> Result<String, String> {
-    font_replacement::scan_font_replacements_impl(payload_json)
+/// 在受信任根目录内批量计算普通文件 SHA-256。
+pub(crate) fn hash_files_impl(payload_json: &str) -> Result<String, FileHashError> {
+    file_hashing::hash_files_impl(payload_json)
+}
+
+/// 批量扫描疑似控制符 occurrence 并返回覆盖事实。
+pub fn scan_placeholder_candidates_impl(payload_json: &str) -> Result<String, String> {
+    placeholder_candidates::scan_placeholder_candidates_impl(payload_json)
 }
 
 /// 解析 JavaScript 字符串字面量跨度并返回 JSON 明细。
@@ -73,9 +83,14 @@ pub fn build_write_back_plan_impl(
     )
 }
 
-/// 读取原生核心配置的线程数覆盖值。
-pub fn read_configured_thread_count() -> Result<Option<usize>, String> {
-    pool::read_configured_thread_count()
+/// 返回当前进程共享原生线程池的实际线程数。
+pub fn executor_thread_count() -> Result<usize, String> {
+    pool::executor_thread_count()
+}
+
+/// 解析 `plugins.js` 中已捕获的 `$plugins` 数组文本。
+pub fn parse_plugins_array_impl(payload_json: &str) -> Result<String, String> {
+    plugins::parse_plugins_array_impl(payload_json)
 }
 
 #[cfg(test)]
@@ -159,6 +174,105 @@ mod tests {
         assert_eq!(value["placeholder_risk_count"], json!(0));
         assert_eq!(value["overwide_line_count"], json!(0));
         assert!(value.get("source_residual_items").is_none());
+    }
+
+    #[test]
+    fn quality_output_is_identical_with_one_two_and_four_threads() {
+        let payload = json!({
+            "items": [
+                {
+                    "location_path": "Map001.json/1/0/0",
+                    "item_type": "long_text",
+                    "role": null,
+                    "original_lines": ["Hello Alice"],
+                    "translation_lines": ["你好 Alice"]
+                },
+                {
+                    "location_path": "Map001.json/2/0/0",
+                    "item_type": "short_text",
+                    "role": null,
+                    "original_lines": [r"\V[1]Text"],
+                    "translation_lines": [r"\V[2]译文"]
+                },
+                {
+                    "location_path": "Map001.json/3/0/0",
+                    "item_type": "long_text",
+                    "role": null,
+                    "original_lines": ["Text"],
+                    "translation_lines": ["一二三四五"]
+                }
+            ],
+            "text_rules": {
+                "custom_placeholder_rules": [],
+                "source_residual_allowed_chars": [],
+                "source_residual_allowed_tail_chars": [],
+                "source_residual_segment_pattern": r"[A-Za-z][A-Za-z0-9'’_-]*",
+                "source_residual_label": "英文",
+                "allowed_source_residual_terms": [],
+                "source_residual_terms_ignore_case": true,
+                "line_width_count_pattern": r"[^\s]",
+                "residual_escape_sequence_pattern": r"\\[A-Za-z0-9_]+\[[^\]]*\]",
+                "long_text_line_width_limit": 2
+            },
+            "source_residual_rules": []
+        });
+        let payload_json = payload.to_string();
+        let scan = |thread_count: &str| {
+            pool::with_thread_count_override_for_test(Some(thread_count), || {
+                scan_quality_impl(&payload_json).expect("质检应成功")
+            })
+        };
+        let counts = |thread_count: &str| {
+            pool::with_thread_count_override_for_test(Some(thread_count), || {
+                scan_quality_counts_impl(&payload_json).expect("质检计数应成功")
+            })
+        };
+
+        let one_thread_output = scan("1");
+        assert_eq!(scan("2"), one_thread_output);
+        assert_eq!(scan("4"), one_thread_output);
+        let one_thread_counts = counts("1");
+        assert_eq!(counts("2"), one_thread_counts);
+        assert_eq!(counts("4"), one_thread_counts);
+
+        let details: Value = serde_json::from_str(&one_thread_output).expect("明细应为 JSON");
+        let count_values: Value = serde_json::from_str(&one_thread_counts).expect("计数应为 JSON");
+        assert_eq!(
+            count_values["source_residual_count"],
+            json!(
+                details["source_residual_items"]
+                    .as_array()
+                    .expect("源文残留明细应为数组")
+                    .len()
+            )
+        );
+        assert_eq!(
+            count_values["text_structure_count"],
+            json!(
+                details["text_structure_items"]
+                    .as_array()
+                    .expect("结构明细应为数组")
+                    .len()
+            )
+        );
+        assert_eq!(
+            count_values["placeholder_risk_count"],
+            json!(
+                details["placeholder_risk_items"]
+                    .as_array()
+                    .expect("占位符明细应为数组")
+                    .len()
+            )
+        );
+        assert_eq!(
+            count_values["overwide_line_count"],
+            json!(
+                details["overwide_line_items"]
+                    .as_array()
+                    .expect("行宽明细应为数组")
+                    .len()
+            )
+        );
     }
 
     #[test]
@@ -266,6 +380,113 @@ mod tests {
             .expect("占位符风险明细应包含原因");
         assert!(reason.contains(r"\nn[Name]"));
         assert!(reason.contains(r"\nn[Other]"));
+    }
+
+    #[test]
+    fn quality_scan_rejects_changed_candidate_hidden_by_custom_prefix() {
+        let mut text_rules = minimal_text_rules();
+        text_rules["custom_placeholder_rules"] = json!([{
+            "pattern_text": r"\\X",
+            "placeholder_template": "[CUSTOM_X_PREFIX_{index}]"
+        }]);
+        let payload = json!({
+            "items": [
+                {
+                    "location_path": "Map001.json/1/0/0",
+                    "item_type": "long_text",
+                    "role": null,
+                    "original_lines": [r"\X[1]こんにちは"],
+                    "translation_lines": [r"\X[2]你好"]
+                }
+            ],
+            "text_rules": text_rules,
+            "source_residual_rules": []
+        });
+
+        let output = scan_quality_impl(&payload.to_string()).expect("质检应成功");
+        let value: Value = serde_json::from_str(&output).expect("输出应是 JSON");
+        let reason = value["placeholder_risk_items"][0]["reason"]
+            .as_str()
+            .expect("占位符风险明细应包含原因");
+
+        assert!(reason.contains(r"\X[1]"));
+        assert!(reason.contains("译文: 无"));
+    }
+
+    #[test]
+    fn structured_placeholder_requires_and_accepts_complete_paired_shell() {
+        let mut text_rules = minimal_text_rules();
+        text_rules["structured_placeholder_rules"] = json!([
+            {
+                "rule_name": "mv_name_window",
+                "rule_type": "paired_shell",
+                "pattern_text": r"(?P<open>\\NW\[)(?P<text>[^\]]+)(?P<close>\])",
+                "translatable_group": "text",
+                "protected_groups": {
+                    "open": "[CUSTOM_MV_NW_OPEN_{index}]",
+                    "close": "[CUSTOM_MV_NW_CLOSE_{index}]"
+                }
+            }
+        ]);
+        let payload = json!({
+            "items": [
+                {
+                    "location_path": "Map001.json/1/0/0",
+                    "item_type": "long_text",
+                    "role": null,
+                    "original_lines": [r"\NW[神父]"],
+                    "translation_lines": [r"\NW[神父]"]
+                }
+            ],
+            "text_rules": text_rules,
+            "source_residual_rules": []
+        });
+        let output = scan_quality_impl(&payload.to_string()).expect("完整 paired shell 应通过");
+        let value: Value = serde_json::from_str(&output).expect("输出应是 JSON");
+        assert_eq!(value["placeholder_risk_items"], json!([]));
+    }
+
+    #[test]
+    fn structured_placeholder_rejects_unprotected_gap_inside_full_match() {
+        let mut text_rules = minimal_text_rules();
+        text_rules["structured_placeholder_rules"] = json!([
+            {
+                "rule_name": "bad_gap",
+                "rule_type": "paired_shell",
+                "pattern_text": r"(?P<open>\\NW\[):(?P<text>[^\]]+)(?P<close>\])",
+                "translatable_group": "text",
+                "protected_groups": {
+                    "open": "[CUSTOM_MV_NW_OPEN_{index}]",
+                    "close": "[CUSTOM_MV_NW_CLOSE_{index}]"
+                }
+            }
+        ]);
+        let payload = json!({
+            "items": [
+                {
+                    "location_path": "Map001.json/1/0/0",
+                    "item_type": "long_text",
+                    "role": null,
+                    "original_lines": [r"\NW[:神父]"],
+                    "translation_lines": [r"\NW[:神父]"]
+                }
+            ],
+            "text_rules": text_rules,
+            "source_residual_rules": []
+        });
+        let output = scan_quality_impl(&payload.to_string()).expect("质检应返回结构化问题");
+        let value: Value = serde_json::from_str(&output).expect("输出应是 JSON");
+        for bucket in [
+            "source_residual_items",
+            "text_structure_items",
+            "placeholder_risk_items",
+        ] {
+            assert!(
+                value[bucket][0]["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("没有连续覆盖完整匹配"))
+            );
+        }
     }
 
     #[test]
@@ -409,40 +630,9 @@ mod tests {
         let value: Value = serde_json::from_str(&output).expect("输出应是 JSON");
         assert_eq!(value.as_array().map(Vec::len), Some(2));
         assert_eq!(value[0]["location_prefix"], "Items.json/1");
+        assert_eq!(value[0]["matches"][0]["tag_name"], "说明");
+        assert_eq!(value[0]["matches"][0]["value"], "旧文本");
+        assert_eq!(value[0]["matches"][0]["has_value"], true);
         assert_eq!(value[1]["location_prefix"], "Items.json/1/effects/0");
-    }
-
-    #[test]
-    fn font_scan_reports_direct_and_encoded_json_changes() {
-        let payload = json!({
-            "data": {
-                "System.json": {
-                    "advanced": {
-                        "mainFontFilename": "OldFont.woff",
-                        "nested": "{\"font\": \"AnotherFont.woff\", \"text\": \"正文\"}"
-                    }
-                },
-                "plugins.js": "var $plugins = [];"
-            },
-            "plugins": [
-                {
-                    "parameters": {
-                        "FontFace": "fonts/OldFont",
-                        "HelpText": "请选择 OldFont 字体"
-                    }
-                }
-            ],
-            "old_font_names": ["AnotherFont.woff", "OldFont.woff", "OldFont"],
-            "replacement_font_name": "NotoSansSC-Regular.ttf"
-        });
-        let output = scan_font_replacements_impl(&payload.to_string()).expect("扫描应成功");
-        let value: Value = serde_json::from_str(&output).expect("输出应是 JSON");
-        assert_eq!(value["replaced_count"], 3);
-        assert_eq!(value["data_changes"].as_array().map(Vec::len), Some(2));
-        assert_eq!(value["plugin_changes"].as_array().map(Vec::len), Some(1));
-        assert_eq!(
-            value["plugin_changes"][0]["replaced_text"],
-            "fonts/NotoSansSC-Regular.ttf"
-        );
     }
 }

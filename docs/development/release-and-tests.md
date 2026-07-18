@@ -1,71 +1,93 @@
 # 发布与测试
 
-## 职责
+## 发布边界
 
-发布与测试文档覆盖发行包构建、Skill 分发、提示词、GitHub Actions 和自动化测试。正式发行包只由 GitHub Actions `release` 工作流生成。`scripts/build_release.py` 负责发布目录、可执行文件、发行版 README、发行版 Skill、字体、提示词和空数据目录的包装。
+v0.1.15 只发布 Windows x86_64。正式发行包只能由 GitHub Actions 的 `release` 工作流从已经存在的 `v0.1.15` 标签构建；本机不得生成或上传正式发行包。
 
-## 输入
+创建标签前，使用 `release preflight` 工作流输入完整 40 位 commit SHA。预检会精确 checkout 该提交，并执行与正式发布相同的质量门禁、两次构建比较和普通用户冒烟；它不要求 tag、没有发布权限，也不包含 GitHub Release 步骤。预检产物默认不上传，只有显式启用 `upload_artifacts` 时才保留七天验证附件。
 
-- GitHub Actions 触发标签、手动输入的发布标签，或本地大样本性能基准参数。
-- 源码仓库中的配置模板、字体、提示词、发行版 Skill 和发布 README。
-- Python、Rust 和测试依赖。
+正式发布拆成权限隔离的两个 job：`verify_release` 只有 `contents: read`，负责完整门禁、构建和上传同次 handoff artifact；`publish_release` 才拥有 `contents: write`，只下载该 artifact，禁止重新构建。发布前必须用 verify job 独立传入的四个 SHA-256 复核 ZIP、pylock、release manifest 和 `SHA256SUMS`，再核对 manifest、`HEAD`、本地 tag 以及远端 tag 的 peeled commit 全部等于最初验证的提交。
 
-## 输出
+发布工作流还必须确认 Python 包、Rust crate、wheel 与 CLI 版本均为 `0.1.15`。工具链、Python 发行物、Actions SHA 和下载校验值以仓库根目录的 `release-toolchain.lock.json` 为唯一发布锁；`actions/download-artifact` 也必须使用锁中的完整提交 SHA。
 
-- `att-mz-windows-x86_64.zip`。
-- 发行包内的 `att-mz.exe`、`README.md`、`setting.toml`、`skills/att-mz/SKILL.md`、Skill references、字体、提示词和空数据目录。
-- CI 中的类型检查、测试、构建和冒烟测试结果。
-- 本地大样本性能基准 JSON 结果。
+## 发行物
 
-## 失败策略
+发布任务只上传以下已经完成全部检查的文件，不在上传阶段重新构建：
 
-- 本机执行发行版构建脚本会失败；正式发行版只能由 GitHub Actions 构建。
-- 发布工作流先执行 `uv run basedpyright`、`uv run pytest`、`cargo fmt --manifest-path rust/Cargo.toml -- --check`、`cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings` 和 `cargo test --manifest-path rust/Cargo.toml`，通过后才构建发行包。
-- 发行包冒烟测试必须验证 `att-mz.exe --help` 和空注册表读取。
-- 大样本性能门禁不能在 GitHub 托管 runner 上伪造执行；私有样本只能放在本机或持有样本的专用环境。发布前在持有样本的环境运行下面的命令。失败时暂停发布：
+- `att-mz-windows-x86_64.zip`
+- `SHA256SUMS.txt`
+- `pylock.windows-x86_64.toml`
+- `release-manifest.json`
+
+ZIP 使用固定 CPython 3.14.6、copy-only 运行依赖、项目 wheel 和只负责相对路径启动的 Rust `att-mz.exe`。安装后的标准库、项目和依赖模块会确定性编译为相邻 legacy `.pyc`；所有 pyc 固定使用 `UNCHECKED_HASH`，代码对象只记录 runtime 相对 POSIX 路径。随后删除 `.py`、`.pyi`、C/C++ 头文件与源码、Tcl/Tk、链接库、类型标记和 shell/虚拟环境等开发资产，并同步重写 wheel `RECORD`。
+
+用户侧不包含 PEX/scie，也不得创建对应缓存。ZIP 不包含 Python 源码或开发文件、日志、PDB、测试、仓库源码目录、数据库、历史输出或构建机绝对路径。发布门禁会使用固定 runtime 反序列化全部 pyc 检查 `co_filename`，并实际导入 `encodings`、OpenAI、Pydantic 以及读取/执行 SQLite schema。
+
+## 工程门禁
+
+源码或可执行契约变更必须依次通过：
 
 ```powershell
-uv run python scripts/benchmark_rebuild_active_runtime.py `
-  --sample <样本游戏目录> `
-  --game <游戏标题> `
-  --db <数据库路径> `
-  --runs 1 `
-  --rust-threads 4 `
-  --reset-active-data-from-origin `
-  --max-slowest-ms 120000 `
-  --max-rust-plan-ms 45000 `
-  --max-file-replacement-ms 1500 `
-  --max-post-write-audit-ms 20000
+uv lock --check
+uv run --locked ruff format --check .
+uv run --locked ruff check .
+uv run --locked basedpyright
+$env:ATT_MZ_RUST_THREADS = "1"
+uv run --locked pytest -q -n 12 --dist=load --durations=30 --durations-min=0.5
+cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+cargo clippy --manifest-path rust/Cargo.toml --locked --all-targets --all-features -- -D warnings
+cargo test --manifest-path rust/Cargo.toml --locked
+cargo build --manifest-path rust/Cargo.toml --locked --release --bin att-mz
+uv run --locked maturin develop --release --locked
+uv run --locked python scripts/generate_skill_protocol.py --check
+uv run --locked python -m scripts.release_safety_selftest
+pwsh -NoProfile -File scripts/run_release_verification.ps1 -SelfTest
+pwsh -NoProfile -File scripts/smoke_release_windows.ps1 -SelfTest
+pwsh -NoProfile -File scripts/verify_release_handoff.ps1 -SelfTest
 ```
 
-该命令会复制样本和数据库到临时目录，把临时样本的 `data_origin/*.json` 复制回 `data/*.json`，再计时 `rebuild-active-runtime`，用于验证真实文件替换、Rust 计划、文件替换和写后审计热路径。阈值来自 4 线程大样本基线并留有波动余量；如果硬件、样本规模或线程配置变化，需要先记录新基线，再调整阈值。
+pytest 只固定 `app/` 的当前生产契约、native 边界和公开 CLI 行为。Skill、README、发布说明和 workflow 不使用 pytest 固定；Skill 生成漂移由 `scripts/generate_skill_protocol.py --check` 检查。
 
-性能门禁结果需要记录样本规模、`rust_threads`、`threshold_failures=[]`、总耗时、Rust 计划耗时、文件替换耗时和写后审计耗时。
+## 私有样本性能验收
 
-`--rust-threads 4` 只是发布门禁的可重复基线，不是运行上限。真实翻译、验收、写回和当前运行审计流程应按 Skill 要求设置 `ATT_MZ_RUST_THREADS`，优先使用运行主机可用逻辑处理器数量；如果发布门禁也改用更高线程数，必须同步记录新基线并调整阈值。
+性能验收必须在持有隔离 `<性能验收游戏副本>` 的环境执行。runner、fixture、manifest 和生成语料只作为临时执行资产，结束后删除，不进入 Git。
 
-## 协作模块
+对同一 release 构建和固定语料，v0.1.9 与 v0.1.15 各预热一次、执行七次，记录 p50、p95、CPU、RSS、阶段耗时与扫描次数，并检查：
 
-- 开发版 Skill 位于 `skills/att-mz/SKILL.md`，用于源码环境中的翻译流程。
-- 发行版 Skill 位于 `skills/att-mz-release/SKILL.md`，发布时改写为发行包内的 `skills/att-mz/SKILL.md`。
-- 提示词位于 `prompts/`，正文翻译 prompt 不应暴露数据库字段、内部路径或程序定位细节。
-- 测试目录按业务域覆盖 CLI、配置、Agent 工具箱、文本规则、翻译、术语、持久化和发布协议。
+- workspace validate：p50 不高于旧版 60%，p95 不高于 70%。
+- placeholder scan：p50 不高于 75%。
+- quality：p50 不高于 80%，CPU 时间不高于 60%。
+- write-back 总耗时不高于 85%，写后审计不高于 50%。
+- 小样本回退不超过 `max(5%, 100ms)`，峰值 RSS 不高于 110%。
+- 大语料四线程耗时不高于单线程 80%。
+
+debug 报告只允许命令/阶段级 `diagnostics.timings` 与扫描次数，不得逐行、逐文本或逐候选计时。没有真实 CLI 数据时不得写成性能验收通过。
+
+## 可复现构建与普通用户冒烟
+
+`release preflight` 与 `release` 都调用 `scripts/run_release_verification.ps1`，避免两套发布门禁漂移。共享脚本要求干净 Git 工作区；两个输出目录必须是工作区内互不相同的普通直接子目录，不能嵌套、越界或经过 reparse point，ZIP 名只能是单个安全 basename。构建脚本对相同边界再次校验，并在任何递归删除前扫描整棵目标树拒绝后代链接。
+
+共享脚本在两个干净输出目录独立构建，wheel、native 模块和最终 ZIP 必须逐字节一致。ZIP 生成后解压到同时包含空格、中文和深层目录的路径，由无管理员权限且符号链接创建明确返回 Win32 错误 1314 的普通用户执行：
+
+```powershell
+.\att-mz.exe --version
+.\att-mz.exe --help
+.\att-mz.exe list
+.\att-mz.exe self-check --offline
+```
+
+四个命令都必须逐项捕获退出码、stdout 和 stderr，任何命令输出中的 `WinError 1314` 都会失败。`--version` 与 `--help` 的 stderr 必须为空；`list` 只允许两行已声明的 `INFO` 进度，`self-check --offline` 只允许三行已声明的 `INFO` 进度，额外行或错误级别全部失败。`list` 和 `self-check --offline` 的 stdout 必须是单一 JSON 对象；运行后不得产生 PEX/scie 缓存。
 
 ## 主要入口
 
 - `.github/workflows/release.yml`
+- `.github/workflows/release-preflight.yml`
+- `release-toolchain.lock.json`
 - `scripts/build_release.py`
-- `skills/att-mz/SKILL.md`
-- `skills/att-mz-release/SKILL.md`
-- `prompts/text_translation_ja_to_zh_system.md`
-- `prompts/text_translation_en_to_zh_system.md`
-- `tests/`
-
-## 测试覆盖
-
-- `uv run basedpyright` 是 Python 静态类型交付红线。
-- `uv run pytest` 是 Python 业务测试交付红线。
-- 改到 Rust 或 PyO3 相关代码时执行 `cargo fmt --manifest-path rust/Cargo.toml -- --check`、`cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings` 和 `cargo test --manifest-path rust/Cargo.toml`。
-- 改到 Skill、README、提示词或工作区协议时同步检查 `tests/test_skill_protocol.py`。
-- 改到写文件、插件源码扫描、当前运行审计或性能脚本时，至少运行对应 benchmark 单测；发布前还要按上面的命令执行真实大样本性能门禁。
-- 不要把私有样本路径写入仓库文件或 release workflow。
+- `scripts/run_release_verification.ps1`
+- `scripts/smoke_release_windows.ps1`
+- `scripts/verify_release_handoff.ps1`
+- `scripts/release_safety_selftest.py`
+- `skills/att-mz-protocol/`
+- `scripts/generate_skill_protocol.py`
+- `docs/releases/v0.1.15.md`

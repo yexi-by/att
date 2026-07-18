@@ -7,12 +7,16 @@ from .files import (
     load_terminology_glossary,
     load_terminology_registry,
 )
-from .prompt import TerminologyPromptEntry, TerminologyPromptIndex
+from .prompt import (
+    TerminologyPromptEntry,
+    TerminologyPromptIndex,
+    filter_terminology_prompt_entries,
+)
 from .schemas import (
     DatabaseTermContext,
     SpeakerDialogueContext,
-    TerminologyGlossary,
     TerminologyCategory,
+    TerminologyGlossary,
     TerminologyRegistry,
     collect_terminology_bundle_errors,
     validate_terminology_bundle,
@@ -30,6 +34,7 @@ __all__: list[str] = [
     "TerminologyRegistry",
     "collect_terminology_bundle_errors",
     "export_terminology_artifacts",
+    "filter_terminology_prompt_entries",
     "load_terminology_glossary",
     "load_terminology_registry",
     "validate_terminology_bundle",

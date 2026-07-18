@@ -172,6 +172,8 @@ def setup_logger(
 
     for module_name in NOISY_MODULES:
         logging.getLogger(module_name).setLevel(logging.WARNING)
+
+
 setup_logger()
 
 __all__ = [

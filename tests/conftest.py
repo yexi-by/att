@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from app.runtime_paths import APP_HOME_ENV_NAME
 from app.rmmz.text_rules import JsonValue
+from app.runtime_paths import APP_HOME_ENV_NAME
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_SETTING_PATH = ROOT / "setting.example.toml"

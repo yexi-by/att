@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from app.application.file_writer import replace_json_file, replace_plugins_file, replace_text_file
+from app.application.write_transaction import PlannedFileWrite
 from app.rmmz.loader import resolve_game_layout
 from app.rmmz.schema import GameData
 from app.rmmz.text_rules import JsonValue
@@ -20,13 +22,23 @@ from .references import (
     restore_font_references_in_json_value_by_origin,
 )
 
-def restore_font_references_from_origin_backups(
+
+@dataclass(frozen=True, slots=True)
+class OriginFontRestorePlan:
+    """字体引用还原的纯计划结果。"""
+
+    content_root: Path
+    writes: tuple[PlannedFileWrite, ...]
+    summary: OriginFontRestoreSummary
+
+
+def plan_font_references_from_origin_backups(
     *,
     game_root: Path | None = None,
     game_data: GameData | None = None,
     replacement_font_names: list[str],
-) -> OriginFontRestoreSummary:
-    """对比激活版和原始备份，把覆盖字体引用替回原来的字体引用。"""
+) -> OriginFontRestorePlan:
+    """对比激活版和原始备份，仅生成还原写入计划。"""
     if game_data is not None:
         layout = game_data.layout
     elif game_root is not None:
@@ -34,9 +46,7 @@ def restore_font_references_from_origin_backups(
     else:
         raise ValueError("字体还原需要游戏数据或游戏目录")
 
-    target_font_names = normalize_font_name_list(
-        build_font_reference_tokens(replacement_font_names)
-    )
+    target_font_names = normalize_font_name_list(build_font_reference_tokens(replacement_font_names))
     if not target_font_names:
         raise ValueError("字体还原缺少候选覆盖字体名称")
 
@@ -46,15 +56,12 @@ def restore_font_references_from_origin_backups(
     origin_plugins_path = layout.plugins_origin_path
     active_gamefont_css_path = layout.content_root / FONTS_DIRECTORY_NAME / GAMEFONT_CSS_FILE_NAME
     origin_gamefont_css_path = active_gamefont_css_path.with_name(GAMEFONT_CSS_ORIGIN_FILE_NAME)
-    if (
-        not origin_data_dir.exists()
-        and not origin_plugins_path.exists()
-        and not origin_gamefont_css_path.exists()
-    ):
+    if not origin_data_dir.exists() and not origin_plugins_path.exists() and not origin_gamefont_css_path.exists():
         raise FileNotFoundError("字体还原需要 data_origin、plugins_origin.js 或 gamefont_origin.css 原始备份")
 
     restored_field_count = 0
     restored_reference_count = 0
+    writes: list[PlannedFileWrite] = []
     if origin_data_dir.exists():
         if not origin_data_dir.is_dir():
             raise NotADirectoryError(f"原件数据留档不是目录: {origin_data_dir}")
@@ -71,10 +78,11 @@ def restore_font_references_from_origin_backups(
             )
             if field_count == 0:
                 continue
-            replace_json_file(
-                target_path=active_file_path,
-                data=updated_value,
-                temp_dir=layout.content_root,
+            writes.append(
+                PlannedFileWrite.from_text(
+                    target_path=active_file_path,
+                    content=f"{json.dumps(updated_value, ensure_ascii=False, indent=2)}\n",
+                )
             )
             restored_field_count += field_count
             restored_reference_count += reference_count
@@ -97,10 +105,11 @@ def restore_font_references_from_origin_backups(
                 if not isinstance(plugin_value, dict):
                     raise TypeError(f"字体还原后的第 {index} 个插件不是对象")
                 updated_plugins.append(plugin_value)
-            replace_plugins_file(
-                plugins_path=active_plugins_path,
-                data=serialize_plugins_js(updated_plugins),
-                temp_dir=active_plugins_path.parent,
+            writes.append(
+                PlannedFileWrite.from_text(
+                    target_path=active_plugins_path,
+                    content=serialize_plugins_js(updated_plugins),
+                )
             )
             restored_field_count += field_count
             restored_reference_count += reference_count
@@ -116,16 +125,27 @@ def restore_font_references_from_origin_backups(
             target_font_names=target_font_names,
         )
         if field_count > 0:
-            replace_text_file(
-                target_path=active_gamefont_css_path,
-                content=updated_css_text,
-                temp_dir=active_gamefont_css_path.parent,
+            writes.append(
+                PlannedFileWrite.from_text(
+                    target_path=active_gamefont_css_path,
+                    content=updated_css_text,
+                )
             )
             restored_field_count += field_count
             restored_reference_count += reference_count
 
-    return OriginFontRestoreSummary(
-        target_font_names=target_font_names,
-        restored_field_count=restored_field_count,
-        restored_reference_count=restored_reference_count,
+    return OriginFontRestorePlan(
+        content_root=layout.content_root,
+        writes=tuple(writes),
+        summary=OriginFontRestoreSummary(
+            target_font_names=target_font_names,
+            restored_field_count=restored_field_count,
+            restored_reference_count=restored_reference_count,
+        ),
     )
+
+
+__all__ = [
+    "OriginFontRestorePlan",
+    "plan_font_references_from_origin_backups",
+]

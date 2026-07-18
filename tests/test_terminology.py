@@ -13,7 +13,13 @@ from app.llm import LLMHandler
 from app.persistence import GameRegistry
 from app.rmmz import DataTextExtraction, load_game_data
 from app.rmmz.schema import MvVirtualNameboxRuleRecord, TranslationData, TranslationItem
-from app.rmmz.text_rules import TextRules, coerce_json_value, ensure_json_array, ensure_json_object, get_default_text_rules
+from app.rmmz.text_rules import (
+    TextRules,
+    coerce_json_value,
+    ensure_json_array,
+    ensure_json_object,
+    get_default_text_rules,
+)
 from app.terminology import (
     SpeakerDialogueContext,
     TerminologyCategory,
@@ -90,12 +96,8 @@ async def test_export_terminology_writes_terms_and_contexts(
         output_dir=tmp_path / "terminology",
     )
 
-    registry = TerminologyRegistry.model_validate_json(
-        summary.field_terms_path.read_text(encoding="utf-8")
-    )
-    glossary = TerminologyGlossary.model_validate_json(
-        summary.glossary_path.read_text(encoding="utf-8")
-    )
+    registry = TerminologyRegistry.model_validate_json(summary.field_terms_path.read_text(encoding="utf-8"))
+    glossary = TerminologyGlossary.model_validate_json(summary.glossary_path.read_text(encoding="utf-8"))
     assert set(registry.model_dump(mode="json")) == {
         "speaker_names",
         "map_display_names",
@@ -218,9 +220,7 @@ async def test_english_terminology_export_skips_existing_chinese_terms(
     finally:
         await handler.close()
 
-    exported_registry = TerminologyRegistry.model_validate_json(
-        summary.field_terms_path.read_text(encoding="utf-8")
-    )
+    exported_registry = TerminologyRegistry.model_validate_json(summary.field_terms_path.read_text(encoding="utf-8"))
     exported_text = json_dump_text(exported_registry)
     assert r"\c[14]水池" not in exported_text
     assert "水池的水位" not in exported_text
@@ -312,8 +312,7 @@ async def test_import_terminology_accepts_cleaned_glossary_from_wrapped_field_te
     exported_registry = await load_terminology_registry(field_terms_path=summary.field_terms_path)
     filled_category_map: dict[TerminologyCategory, dict[str, str]] = {
         category: {
-            source_text: "/c索菲亚" if source_text == "/cソフィア" else f"{source_text}译"
-            for source_text in entries
+            source_text: "/c索菲亚" if source_text == "/cソフィア" else f"{source_text}译" for source_text in entries
         }
         for category, entries in exported_registry.as_category_map().items()
     }
@@ -386,9 +385,7 @@ async def test_mv_terminology_skips_mz_name_box_parameter(
         game_data=game_data,
         output_dir=tmp_path / "mv-terminology",
     )
-    registry = TerminologyRegistry.model_validate_json(
-        summary.field_terms_path.read_text(encoding="utf-8")
-    )
+    registry = TerminologyRegistry.model_validate_json(summary.field_terms_path.read_text(encoding="utf-8"))
 
     assert registry.speaker_names == {}
     assert summary.sample_file_count == 0
@@ -495,9 +492,7 @@ async def test_mv_terminology_collects_401_speakers_as_virtual_name_boxes(
         output_dir=tmp_path / "mv-speaker-terminology",
         mv_virtual_namebox_rule_records=mv_namebox_rules,
     )
-    registry = TerminologyRegistry.model_validate_json(
-        summary.field_terms_path.read_text(encoding="utf-8")
-    )
+    registry = TerminologyRegistry.model_validate_json(summary.field_terms_path.read_text(encoding="utf-8"))
 
     assert registry.speaker_names == {
         "MV勇者": "",
@@ -573,7 +568,9 @@ async def test_mv_terminology_collects_401_speakers_as_virtual_name_boxes(
     dynamic_event = ensure_json_object(current_events[6], "CommonEvents[6]")
     dynamic_commands = ensure_json_array(dynamic_event["list"], "CommonEvents[6].list")
     dynamic_text_command = ensure_json_object(dynamic_commands[1], "CommonEvents[6].list[1]")
-    dynamic_text_parameters = ensure_json_array(dynamic_text_command["parameters"], "CommonEvents[6].list[1].parameters")
+    dynamic_text_parameters = ensure_json_array(
+        dynamic_text_command["parameters"], "CommonEvents[6].list[1].parameters"
+    )
     assert dynamic_text_parameters[0] == "<\\n[1]>"
 
 
@@ -748,9 +745,7 @@ async def test_terminology_skips_actor_name_control_variables(
         game_data=game_data,
         output_dir=tmp_path / "terminology",
     )
-    registry = TerminologyRegistry.model_validate_json(
-        summary.field_terms_path.read_text(encoding="utf-8")
-    )
+    registry = TerminologyRegistry.model_validate_json(summary.field_terms_path.read_text(encoding="utf-8"))
 
     assert "\\n[1]：" not in registry.speaker_names
 
@@ -798,7 +793,7 @@ def test_translation_prompt_injects_filled_terminology() -> None:
     batches = list(
         iter_translation_context_batches(
             translation_data=data,
-            token_size=100,
+            token_size=2000,
             factor=1.0,
             max_command_items=3,
             system_prompt="系统提示",
@@ -842,7 +837,7 @@ def test_translation_prompt_matches_normalized_term_inside_field_wrapper() -> No
     batches = list(
         iter_translation_context_batches(
             translation_data=data,
-            token_size=100,
+            token_size=2000,
             factor=1.0,
             max_command_items=3,
             system_prompt="系统提示",
@@ -876,7 +871,7 @@ def test_translation_prompt_matches_canonical_term_without_field_wrapper() -> No
     batches = list(
         iter_translation_context_batches(
             translation_data=data,
-            token_size=100,
+            token_size=2000,
             factor=1.0,
             max_command_items=3,
             system_prompt="系统提示",
@@ -910,7 +905,7 @@ async def test_translation_prompt_injects_same_database_entry_name(
     batches = list(
         iter_translation_context_batches(
             translation_data=data,
-            token_size=100,
+            token_size=2000,
             factor=1.0,
             max_command_items=3,
             system_prompt="系统提示",

@@ -13,19 +13,21 @@ from app.rmmz.schema import (
 )
 from app.terminology.schemas import TERMINOLOGY_CATEGORIES, TerminologyCategory
 
+
 def build_event_command_group_key(rule_record: EventCommandTextRuleRecord) -> str:
     """生成事件指令规则组主键。"""
     filter_text = "|".join(
-        f"{parameter_filter.index}={parameter_filter.value}"
-        for parameter_filter in rule_record.parameter_filters
+        f"{parameter_filter.index}={parameter_filter.value}" for parameter_filter in rule_record.parameter_filters
     )
     payload = f"{rule_record.command_code}:{filter_text}"
     digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
     return f"event_{rule_record.command_code}_{digest}"
 
+
 def current_timestamp_text() -> str:
     """生成数据库状态记录使用的本地时间文本。"""
     return datetime.now().isoformat(timespec="seconds")
+
 
 def parse_translation_run_status(value: str, db_path: Path) -> TranslationRunStatus:
     """校验并收窄数据库中的翻译运行状态。"""
@@ -33,6 +35,7 @@ def parse_translation_run_status(value: str, db_path: Path) -> TranslationRunSta
     if value in allowed:
         return value
     raise RuntimeError(f"数据库字段 status 不是有效翻译运行状态: {db_path}")
+
 
 def parse_llm_failure_category(value: str, db_path: Path) -> LlmFailureCategory:
     """校验并收窄数据库中的模型故障分类。"""
@@ -49,6 +52,7 @@ def parse_llm_failure_category(value: str, db_path: Path) -> LlmFailureCategory:
         return value
     raise RuntimeError(f"数据库字段 category 不是有效模型故障分类: {db_path}")
 
+
 def parse_error_type(value: str, db_path: Path) -> ErrorType:
     """校验并收窄数据库中的译文检查错误类型。"""
     allowed: set[ErrorType] = {
@@ -63,11 +67,13 @@ def parse_error_type(value: str, db_path: Path) -> ErrorType:
         return value
     raise RuntimeError(f"数据库字段 error_type 不是有效译文检查错误类型: {db_path}")
 
+
 def parse_source_residual_rule_type(value: str, db_path: Path) -> SourceResidualRuleType:
     """校验并收窄数据库中的源文残留例外规则类型。"""
     if value == "position" or value == "structural":
         return value
     raise RuntimeError(f"数据库字段 rule_type 不是有效源文残留例外规则类型: {db_path}")
+
 
 def parse_terminology_category(value: str, db_path: Path) -> TerminologyCategory:
     """校验并收窄数据库中的术语类别。"""

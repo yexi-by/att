@@ -10,8 +10,11 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from app.config.schemas import TextRulesSetting
+from app.language import SourceLanguage
+from app.language_profiles import language_profile
 from app.rmmz.control_codes import (
     ALL_PLACEHOLDER_PATTERN,
     ControlSequenceSpan,
@@ -34,6 +37,34 @@ from app.rmmz.json_types import (
     ensure_json_string_list,
 )
 
+type ControlSequenceCoverageKind = Literal["standard", "custom", "structured", "uncovered"]
+
+
+@dataclass(frozen=True, slots=True)
+class ControlSequenceCandidateCoverage:
+    """记录单次疑似控制符在当前文本中的实际覆盖结果。"""
+
+    candidate: RawControlSequenceCandidate
+    marker: str
+    coverage_kind: ControlSequenceCoverageKind
+    matched_rule_ids: tuple[str, ...] = ()
+
+    @property
+    def covered(self) -> bool:
+        """返回该 occurrence 是否已由完整规则覆盖。"""
+        return self.coverage_kind != "uncovered"
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredPlaceholderMatch:
+    """记录一次已验证完整外壳的结构化规则命中。"""
+
+    start_index: int
+    end_index: int
+    rule_name: str
+    translatable_range: tuple[int, int]
+    protected_ranges: tuple[tuple[int, int], ...]
+
 
 @dataclass(frozen=True, slots=True)
 class TextRules:
@@ -44,6 +75,8 @@ class TextRules:
     structured_placeholder_rules: tuple[StructuredPlaceholderRule, ...]
     placeholder_token_pattern: re.Pattern[str]
     source_text_required_pattern: re.Pattern[str]
+    source_detection_patterns: tuple[tuple[SourceLanguage, re.Pattern[str]], ...]
+    custom_source_detection_pattern: re.Pattern[str] | None
     source_residual_segment_pattern: re.Pattern[str]
     line_width_count_pattern: re.Pattern[str]
     residual_escape_sequence_pattern: re.Pattern[str]
@@ -56,12 +89,34 @@ class TextRules:
         structured_placeholder_rules: tuple[StructuredPlaceholderRule, ...] = (),
     ) -> "TextRules":
         """根据配置构建并预编译全部正则规则。"""
+        source_languages: tuple[SourceLanguage, ...] = (
+            setting.source_language,
+            *setting.additional_source_languages,
+        )
+        builtin_pattern_text = "|".join(
+            f"(?:{language_profile(language).source_text_required_pattern})" for language in source_languages
+        )
+        single_language_pattern_text = language_profile(setting.source_language).source_text_required_pattern
+        custom_source_detection_pattern = (
+            None
+            if setting.source_text_required_pattern in {builtin_pattern_text, single_language_pattern_text}
+            else re.compile(setting.source_text_required_pattern)
+        )
+        detection_patterns: tuple[tuple[SourceLanguage, re.Pattern[str]], ...] = tuple(
+            (
+                language,
+                re.compile(language_profile(language).source_text_required_pattern),
+            )
+            for language in source_languages
+        )
         return cls(
             setting=setting,
             custom_placeholder_rules=custom_placeholder_rules,
             structured_placeholder_rules=structured_placeholder_rules,
             placeholder_token_pattern=ALL_PLACEHOLDER_PATTERN,
             source_text_required_pattern=re.compile(setting.source_text_required_pattern),
+            source_detection_patterns=detection_patterns,
+            custom_source_detection_pattern=custom_source_detection_pattern,
             source_residual_segment_pattern=re.compile(setting.source_residual_segment_pattern),
             line_width_count_pattern=re.compile(setting.line_width_count_pattern),
             residual_escape_sequence_pattern=re.compile(setting.residual_escape_sequence_pattern),
@@ -92,7 +147,7 @@ class TextRules:
         parts: list[str] = []
         last_end = 0
         for span in spans:
-            parts.append(text[last_end:span.start_index])
+            parts.append(text[last_end : span.start_index])
             parts.append(replacer(span))
             last_end = span.end_index
         parts.append(text[last_end:])
@@ -104,20 +159,46 @@ class TextRules:
 
     def iter_control_sequence_spans(self, text: str) -> list[ControlSequenceSpan]:
         """顺序扫描一行文本，识别标准控制符和自定义保护片段。"""
+        return self._scan_control_sequences(text).spans
+
+    def iter_control_sequence_candidate_coverages(
+        self,
+        text: str,
+    ) -> list[ControlSequenceCandidateCoverage]:
+        """逐 occurrence 判断疑似控制符由哪类规则完整覆盖。"""
+        scan_result = self._scan_control_sequences(text)
+        return [
+            _classify_control_sequence_candidate(
+                candidate=candidate,
+                scan_result=scan_result,
+            )
+            for candidate in iter_raw_control_sequence_candidates(text)
+        ]
+
+    def iter_structured_placeholder_matches(self, text: str) -> list[StructuredPlaceholderMatch]:
+        """返回已验证命名分组和完整外壳的结构化命中。"""
+        return self._scan_control_sequences(text).structured_matches
+
+    def _scan_control_sequences(self, text: str) -> "_ControlSequenceScanResult":
+        """一次扫描产生替换、候选覆盖和结构化覆盖共用的事实。"""
         standard_spans = _filter_standard_prefix_conflicts(
             text=text,
             spans=iter_standard_control_spans(text),
         )
-        custom_spans = self._iter_custom_placeholder_spans(text)
+        custom_result = self._iter_custom_placeholder_spans(text)
         structured_result = self._iter_structured_placeholder_spans(text)
         self._validate_structured_placeholder_conflicts(
-            base_spans=[*standard_spans, *custom_spans],
+            base_spans=[*standard_spans, *custom_result.spans],
             structured_spans=structured_result.spans,
             translatable_ranges=structured_result.translatable_ranges,
         )
-        spans = [*standard_spans, *custom_spans]
+        spans = [*standard_spans, *custom_result.spans]
         spans.extend(structured_result.spans)
-        return select_non_overlapping_spans(spans)
+        return _ControlSequenceScanResult(
+            spans=select_non_overlapping_spans(spans),
+            custom_matches=custom_result.matches,
+            structured_matches=structured_result.matches,
+        )
 
     def format_custom_placeholder(self, *, template: str, index: int) -> str:
         """按外部 JSON 模板格式化自定义占位符。"""
@@ -137,15 +218,18 @@ class TextRules:
         normalized_text = self.normalize_extraction_text(text)
         if not normalized_text:
             return False
-        if (
-            self.setting.source_text_exclusion_profile == "english_protocol_noise"
-            and self._is_english_protocol_noise_text(normalized_text)
-        ):
-            return False
         detection_text = self.strip_rm_control_sequences(normalized_text)
         if not detection_text:
             return False
-        return self.source_text_required_pattern.search(detection_text) is not None
+        if self.custom_source_detection_pattern is not None:
+            return self.custom_source_detection_pattern.search(detection_text) is not None
+        for language, pattern in self.source_detection_patterns:
+            if pattern.search(detection_text) is None:
+                continue
+            if language == "en" and self._is_english_protocol_noise_text(detection_text):
+                continue
+            return True
+        return False
 
     def should_translate_source_lines(self, lines: list[str]) -> bool:
         """判断多行原文是否至少包含一处需要翻译的源语言字符。"""
@@ -163,7 +247,7 @@ class TextRules:
         return placeholders
 
     def collect_unprotected_control_sequences(self, lines: list[str]) -> dict[str, int]:
-        """统计未被标准或自定义规则覆盖的疑似控制符片段。"""
+        """统计未被标准、自定义或结构化规则覆盖的疑似控制符。"""
         counts: dict[str, int] = {}
         for line in lines:
             for candidate in self.iter_unprotected_control_sequence_candidates(line):
@@ -175,19 +259,25 @@ class TextRules:
         text: str,
     ) -> list[RawControlSequenceCandidate]:
         """找出一行文本中仍裸露的反斜杠控制符候选。"""
-        protected_spans = self.iter_control_sequence_spans(text)
-        candidates: list[RawControlSequenceCandidate] = []
-        for candidate in iter_raw_control_sequence_candidates(text):
-            if _is_covered_by_control_span(candidate, protected_spans):
-                continue
-            candidates.append(candidate)
-        return candidates
+        return [
+            coverage.candidate
+            for coverage in self.iter_control_sequence_candidate_coverages(text)
+            if not coverage.covered
+        ]
 
-    def _iter_custom_placeholder_spans(self, text: str) -> list[ControlSequenceSpan]:
+    def _iter_custom_placeholder_spans(self, text: str) -> "_CustomPlaceholderScanResult":
         """扫描外部 JSON 中定义的自定义占位符规则。"""
         spans: list[ControlSequenceSpan] = []
+        matches: list[_RuleRange] = []
         for rule in self.custom_placeholder_rules:
             for match in rule.pattern.finditer(text):
+                matches.append(
+                    _RuleRange(
+                        start=match.start(),
+                        end=match.end(),
+                        rule_id=rule.pattern_text,
+                    )
+                )
                 spans.append(
                     ControlSequenceSpan(
                         start_index=match.start(),
@@ -199,12 +289,13 @@ class TextRules:
                         priority=1,
                     )
                 )
-        return spans
+        return _CustomPlaceholderScanResult(spans=spans, matches=matches)
 
     def _iter_structured_placeholder_spans(self, text: str) -> "_StructuredPlaceholderScanResult":
         """扫描外部 JSON 中定义的结构化占位符规则。"""
         spans: list[ControlSequenceSpan] = []
         translatable_ranges: list[_ProtectedRange] = []
+        structured_matches: list[StructuredPlaceholderMatch] = []
         for rule in self.structured_placeholder_rules:
             for match in rule.pattern.finditer(text):
                 translatable_range = _match_group_range(
@@ -212,9 +303,9 @@ class TextRules:
                     group_name=rule.translatable_group,
                     rule_name=rule.rule_name,
                 )
-                translatable_ranges.append(translatable_range)
                 match_key = f"structured:{rule.rule_name}:{match.start()}:{match.end()}:{match.group(0)}"
                 group_ranges: list[_ProtectedRange] = []
+                group_spans: list[ControlSequenceSpan] = []
                 for group_name, placeholder_template in rule.protected_groups.items():
                     protected_range = _match_group_range(
                         match=match,
@@ -229,15 +320,13 @@ class TextRules:
                         )
                     for existing_range in group_ranges:
                         if _ranges_overlap(protected_range, existing_range):
-                            raise ValueError(
-                                f"结构化占位符规则 {rule.rule_name} 的保护分组互相重叠"
-                            )
+                            raise ValueError(f"结构化占位符规则 {rule.rule_name} 的保护分组互相重叠")
                     group_ranges.append(protected_range)
-                    spans.append(
+                    group_spans.append(
                         ControlSequenceSpan(
                             start_index=protected_range.start,
                             end_index=protected_range.end,
-                            original=text[protected_range.start:protected_range.end],
+                            original=text[protected_range.start : protected_range.end],
                             source="structured",
                             placeholder=None,
                             custom_template=placeholder_template,
@@ -245,9 +334,29 @@ class TextRules:
                             custom_index_key=match_key,
                         )
                     )
+                _validate_structured_match_shape(
+                    rule_name=rule.rule_name,
+                    match_range=_ProtectedRange(start=match.start(), end=match.end()),
+                    translatable_range=translatable_range,
+                    protected_ranges=group_ranges,
+                )
+                translatable_ranges.append(translatable_range)
+                spans.extend(group_spans)
+                structured_matches.append(
+                    StructuredPlaceholderMatch(
+                        start_index=match.start(),
+                        end_index=match.end(),
+                        rule_name=rule.rule_name,
+                        translatable_range=(translatable_range.start, translatable_range.end),
+                        protected_ranges=tuple(
+                            (protected_range.start, protected_range.end) for protected_range in group_ranges
+                        ),
+                    )
+                )
         return _StructuredPlaceholderScanResult(
             spans=spans,
             translatable_ranges=translatable_ranges,
+            matches=structured_matches,
         )
 
     def _validate_structured_placeholder_conflicts(
@@ -271,21 +380,17 @@ class TextRules:
                     )
         for index, left_span in enumerate(structured_spans):
             left_range = _ProtectedRange(start=left_span.start_index, end=left_span.end_index)
-            for right_span in structured_spans[index + 1:]:
+            for right_span in structured_spans[index + 1 :]:
                 right_range = _ProtectedRange(start=right_span.start_index, end=right_span.end_index)
                 if _ranges_overlap(left_range, right_range):
-                    raise ValueError(
-                        f"结构化占位符保护片段互相重叠: {left_span.original} / {right_span.original}"
-                    )
+                    raise ValueError(f"结构化占位符保护片段互相重叠: {left_span.original} / {right_span.original}")
         for translatable_range in translatable_ranges:
             for span in [*base_spans, *structured_spans]:
                 span_range = _ProtectedRange(start=span.start_index, end=span.end_index)
                 if _ranges_overlap(translatable_range, span_range):
                     if span.source == "standard":
                         continue
-                    raise ValueError(
-                        f"结构化占位符可翻译文本分组被保护规则覆盖: {span.original}"
-                    )
+                    raise ValueError(f"结构化占位符可翻译文本分组被保护规则覆盖: {span.original}")
 
     def check_source_residual(
         self,
@@ -379,7 +484,10 @@ class TextRules:
             return True
         if re.search(r"(?:^|[\\/])(?:img|audio|fonts|icon|js|data)[\\/]", lowered_text):
             return True
-        if re.search(r"\.(?:png|jpe?g|webp|gif|ogg|m4a|mp3|wav|webm|json|js|css|html|ttf|otf|woff2?|rpgmvp|rpgmvo|rpgmvm)$", lowered_text):
+        if re.search(
+            r"\.(?:png|jpe?g|webp|gif|ogg|m4a|mp3|wav|webm|json|js|css|html|ttf|otf|woff2?|rpgmvp|rpgmvo|rpgmvm)$",
+            lowered_text,
+        ):
             return True
         if self._looks_like_english_script_punctuation(stripped_text):
             return True
@@ -459,24 +567,74 @@ def _is_standard_prefix_of_longer_candidate(
 ) -> bool:
     """判断标准片段是否只是某个更长候选的前缀。"""
     return any(
-        candidate.start_index == span.start_index and candidate.end_index > span.end_index
-        for candidate in candidates
+        candidate.start_index == span.start_index and candidate.end_index > span.end_index for candidate in candidates
     )
 
 
-def _is_covered_by_control_span(
+def _classify_control_sequence_candidate(
+    *,
     candidate: RawControlSequenceCandidate,
-    spans: list[ControlSequenceSpan],
+    scan_result: "_ControlSequenceScanResult",
+) -> ControlSequenceCandidateCoverage:
+    """依据实际选中保护片段和完整外壳命中归类单次候选。"""
+    custom_spans = [
+        span for span in scan_result.spans if span.source == "custom" and _span_contains_candidate(span, candidate)
+    ]
+    if custom_spans:
+        covering_span = custom_spans[0]
+        matching_rule_ids = tuple(
+            sorted(
+                {
+                    match.rule_id
+                    for match in scan_result.custom_matches
+                    if match.start <= candidate.start_index and match.end >= candidate.end_index
+                }
+            )
+        )
+        return ControlSequenceCandidateCoverage(
+            candidate=candidate,
+            marker=covering_span.original,
+            coverage_kind="custom",
+            matched_rule_ids=matching_rule_ids,
+        )
+
+    standard_spans = [
+        span for span in scan_result.spans if span.source == "standard" and _span_contains_candidate(span, candidate)
+    ]
+    if standard_spans:
+        return ControlSequenceCandidateCoverage(
+            candidate=candidate,
+            marker=standard_spans[0].original,
+            coverage_kind="standard",
+            matched_rule_ids=("standard",),
+        )
+
+    structured_matches = [
+        match
+        for match in scan_result.structured_matches
+        if match.start_index == candidate.start_index and match.end_index == candidate.end_index
+    ]
+    if structured_matches:
+        return ControlSequenceCandidateCoverage(
+            candidate=candidate,
+            marker=candidate.original,
+            coverage_kind="structured",
+            matched_rule_ids=tuple(sorted({match.rule_name for match in structured_matches})),
+        )
+
+    return ControlSequenceCandidateCoverage(
+        candidate=candidate,
+        marker=candidate.original,
+        coverage_kind="uncovered",
+    )
+
+
+def _span_contains_candidate(
+    span: ControlSequenceSpan,
+    candidate: RawControlSequenceCandidate,
 ) -> bool:
-    """判断原始候选是否已经由占位符规则覆盖。"""
-    for span in spans:
-        if span.source == "standard":
-            if candidate.start_index >= span.start_index and candidate.end_index <= span.end_index:
-                return True
-            continue
-        if candidate.start_index < span.end_index and candidate.end_index > span.start_index:
-            return True
-    return False
+    """只有完整包含候选的保护片段才能证明该 occurrence 已覆盖。"""
+    return span.start_index <= candidate.start_index and span.end_index >= candidate.end_index
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,11 +646,62 @@ class _ProtectedRange:
 
 
 @dataclass(frozen=True, slots=True)
+class _RuleRange:
+    """记录自定义规则单次命中的范围和稳定标识。"""
+
+    start: int
+    end: int
+    rule_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CustomPlaceholderScanResult:
+    """自定义占位符扫描结果。"""
+
+    spans: list[ControlSequenceSpan]
+    matches: list[_RuleRange]
+
+
+@dataclass(frozen=True, slots=True)
 class _StructuredPlaceholderScanResult:
     """结构化占位符扫描结果。"""
 
     spans: list[ControlSequenceSpan]
     translatable_ranges: list[_ProtectedRange]
+    matches: list[StructuredPlaceholderMatch]
+
+
+@dataclass(frozen=True, slots=True)
+class _ControlSequenceScanResult:
+    """占位符替换与候选覆盖共用的单行扫描结果。"""
+
+    spans: list[ControlSequenceSpan]
+    custom_matches: list[_RuleRange]
+    structured_matches: list[StructuredPlaceholderMatch]
+
+
+def _validate_structured_match_shape(
+    *,
+    rule_name: str,
+    match_range: _ProtectedRange,
+    translatable_range: _ProtectedRange,
+    protected_ranges: list[_ProtectedRange],
+) -> None:
+    """确保 paired_shell 的命名分组完整、连续地覆盖本次正则命中。"""
+    has_opening_shell = any(protected_range.end <= translatable_range.start for protected_range in protected_ranges)
+    has_closing_shell = any(protected_range.start >= translatable_range.end for protected_range in protected_ranges)
+    if not has_opening_shell or not has_closing_shell:
+        raise ValueError(f"结构化占位符规则 {rule_name} 的保护分组必须成对包围可翻译分组")
+
+    named_ranges = sorted(
+        [translatable_range, *protected_ranges],
+        key=lambda item: (item.start, item.end),
+    )
+    if named_ranges[0].start != match_range.start or named_ranges[-1].end != match_range.end:
+        raise ValueError(f"结构化占位符规则 {rule_name} 的命名分组没有完整覆盖外壳命中")
+    for left_range, right_range in zip(named_ranges, named_ranges[1:]):
+        if left_range.end != right_range.start:
+            raise ValueError(f"结构化占位符规则 {rule_name} 的命名分组没有连续覆盖外壳命中")
 
 
 def _match_group_range(
@@ -517,6 +726,8 @@ def _ranges_overlap(left: _ProtectedRange, right: _ProtectedRange) -> bool:
 
 
 __all__: list[str] = [
+    "ControlSequenceCandidateCoverage",
+    "ControlSequenceCoverageKind",
     "ControlSequenceSpan",
     "CustomPlaceholderRule",
     "JsonArray",
@@ -524,6 +735,7 @@ __all__: list[str] = [
     "JsonPrimitive",
     "JsonValue",
     "StructuredPlaceholderRule",
+    "StructuredPlaceholderMatch",
     "TextRules",
     "coerce_json_value",
     "ensure_json_array",

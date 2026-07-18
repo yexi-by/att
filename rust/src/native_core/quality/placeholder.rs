@@ -7,13 +7,15 @@ use serde_json::{Value, json};
 use super::super::details::base_detail;
 use super::super::models::{CompiledRules, NativeTranslationItem};
 use super::super::placeholders::{
-    build_placeholders, collect_placeholder_tokens, mask_translation_controls, verify_placeholders,
+    collect_placeholder_tokens, placeholders_match, verify_placeholders,
 };
+use super::PreparedControlState;
 
 /// 收集单条译文的占位符风险明细。
 pub(super) fn collect_placeholder_detail(
     item: &NativeTranslationItem,
     rules: &CompiledRules,
+    prepared: &Result<PreparedControlState, String>,
 ) -> Option<Value> {
     let leaked_tokens = collect_placeholder_tokens(&item.translation_lines);
     if !leaked_tokens.is_empty() {
@@ -30,21 +32,47 @@ pub(super) fn collect_placeholder_detail(
         return Some(Value::Object(detail));
     }
 
-    match build_placeholders(item, rules).and_then(|placeholder_build| {
-        let translation_lines_with_placeholders =
-            mask_translation_controls(item, rules, &placeholder_build)?;
-        verify_placeholders(
+    match prepared {
+        Ok(prepared) => match verify_placeholders(
             item,
             rules,
-            &placeholder_build,
-            &translation_lines_with_placeholders,
-        )
-    }) {
-        Ok(()) => None,
+            &prepared.placeholder_build,
+            &prepared.translation_lines_with_placeholders,
+        ) {
+            Ok(()) => None,
+            Err(reason) => {
+                let mut detail = base_detail(item);
+                detail.insert("reason".to_string(), json!(reason));
+                Some(Value::Object(detail))
+            }
+        },
         Err(reason) => {
             let mut detail = base_detail(item);
             detail.insert("reason".to_string(), json!(reason));
             Some(Value::Object(detail))
         }
+    }
+}
+
+/// 判断单条译文是否存在占位符风险，不构造报告明细。
+pub(super) fn has_placeholder_issue(
+    item: &NativeTranslationItem,
+    rules: &CompiledRules,
+    prepared: &Result<PreparedControlState, String>,
+) -> bool {
+    if !collect_placeholder_tokens(&item.translation_lines).is_empty() {
+        return true;
+    }
+    match prepared {
+        Ok(prepared) => match placeholders_match(
+            item,
+            rules,
+            &prepared.placeholder_build,
+            &prepared.translation_lines_with_placeholders,
+        ) {
+            Ok(matches) => !matches,
+            Err(_) => true,
+        },
+        Err(_) => true,
     }
 }

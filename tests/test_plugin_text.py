@@ -287,9 +287,7 @@ async def test_plugin_text_write_back_updates_nested_json_string(minimal_game_di
             "$['parameters']['Nested']['text']",
         ],
     )
-    items = PluginTextExtraction(game_data, [rule_record]).extract_all_text()[
-        "plugins.js"
-    ].translation_items
+    items = PluginTextExtraction(game_data, [rule_record]).extract_all_text()["plugins.js"].translation_items
     for item in items:
         if item.location_path.endswith("/Message"):
             item.translation_lines = ["插件译文"]
@@ -318,9 +316,7 @@ async def test_plugin_text_write_back_rejects_internal_placeholder_leak(minimal_
         plugin_hash="hash",
         path_templates=["$['parameters']['Message']"],
     )
-    item = PluginTextExtraction(game_data, [rule_record]).extract_all_text()[
-        "plugins.js"
-    ].translation_items[0]
+    item = PluginTextExtraction(game_data, [rule_record]).extract_all_text()["plugins.js"].translation_items[0]
     item.translation_lines = ["插件译文[RMMZ_TEXT_COLOR_0]"]
 
     reset_writable_copies(game_data)
@@ -352,9 +348,7 @@ async def test_plugin_text_json_string_leaf_uses_visible_text_protocol(minimal_g
         ],
     )
 
-    item = PluginTextExtraction(game_data, [rule_record]).extract_all_text()[
-        "plugins.js"
-    ].translation_items[0]
+    item = PluginTextExtraction(game_data, [rule_record]).extract_all_text()["plugins.js"].translation_items[0]
 
     assert item.location_path == "plugins.js/0/MainEvents/0/MainEventNote"
     assert item.original_lines == [source_note.strip()]

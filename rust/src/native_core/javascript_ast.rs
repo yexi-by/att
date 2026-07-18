@@ -3,22 +3,26 @@
 //! 本模块只解析源码并返回稳定范围，不判断游戏私有语义。
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tree_sitter::{Node, Parser};
 
 use super::pool::run_with_optional_pool;
 use rayon::prelude::*;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JavaScriptAstPayload {
     source: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JavaScriptAstBatchPayload {
     files: Vec<JavaScriptAstBatchInput>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JavaScriptAstBatchInput {
     file_name: String,
     source: String,
@@ -51,6 +55,7 @@ pub(crate) struct JavaScriptStringAstContext {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct JavaScriptAstOutput {
+    pub(crate) source_sha256: String,
     pub(crate) has_error: bool,
     pub(crate) spans: Vec<JavaScriptStringSpan>,
 }
@@ -58,6 +63,7 @@ pub(crate) struct JavaScriptAstOutput {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct JavaScriptAstFileOutput {
     pub(crate) file_name: String,
+    pub(crate) source_sha256: String,
     pub(crate) has_error: bool,
     pub(crate) spans: Vec<JavaScriptStringSpan>,
 }
@@ -97,12 +103,14 @@ fn parse_javascript_file_spans(
         .map_err(|error| format!("{} JS AST 解析失败: {error}", input.file_name))?;
     Ok(JavaScriptAstFileOutput {
         file_name: input.file_name.clone(),
+        source_sha256: output.source_sha256,
         has_error: output.has_error,
         spans: output.spans,
     })
 }
 
 pub(crate) fn parse_javascript_string_spans(source: &str) -> Result<JavaScriptAstOutput, String> {
+    let source_sha256 = format!("{:x}", Sha256::digest(source.as_bytes()));
     let mut parser = Parser::new();
     let language = tree_sitter_javascript::LANGUAGE;
     parser
@@ -116,6 +124,7 @@ pub(crate) fn parse_javascript_string_spans(source: &str) -> Result<JavaScriptAs
     let char_indices = CharIndexLookup::new(source);
     collect_string_nodes(root, source, &char_indices, &mut spans);
     Ok(JavaScriptAstOutput {
+        source_sha256,
         has_error: root.has_error(),
         spans,
     })
@@ -459,12 +468,89 @@ mod tests {
         let value: Value = serde_json::from_str(&output).expect("输出应是 JSON");
         assert_eq!(value["files"].as_array().map(Vec::len), Some(2));
         assert_eq!(value["files"][0]["file_name"], json!("A.js"));
+        assert_eq!(
+            value["files"][0]["source_sha256"],
+            parse_javascript_string_spans("const a = '日文';")
+                .expect("单文件 JS AST 扫描应成功")
+                .source_sha256
+        );
         assert_eq!(value["files"][0]["spans"].as_array().map(Vec::len), Some(1));
         assert_eq!(value["files"][1]["file_name"], json!("B.js"));
         assert_eq!(
             value["files"][1]["spans"][0]["ast_context"]["call_name"],
             json!("Window_Base.prototype.drawText")
         );
+    }
+
+    #[test]
+    fn returns_sha256_for_exact_unicode_utf8_source() {
+        let source = "const 文本 = 'こんにちは😀';";
+
+        let output = parse_javascript_string_spans(source).expect("Unicode JS AST 扫描应成功");
+
+        assert_eq!(
+            output.source_sha256,
+            "960f4efaac990fa56cf2650aa5773734aad3b386309b044cde7b6813a14fd939"
+        );
+    }
+
+    #[test]
+    fn versioned_single_operation_rejects_unknown_payload_field() {
+        let request = versioned_request(
+            "javascript.parse",
+            json!({"source": "const text = '日文';", "unexpected": true}),
+        );
+
+        let response = invoke_versioned_request(request);
+
+        assert_eq!(response["status"], json!("error"));
+        assert_eq!(response["error"]["code"], json!("native_operation_failed"));
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("unknown field `unexpected`"))
+        );
+    }
+
+    #[test]
+    fn versioned_batch_operation_rejects_unknown_nested_input_field() {
+        let request = versioned_request(
+            "javascript.parse_batch",
+            json!({
+                "files": [{
+                    "file_name": "Plugin.js",
+                    "source": "const text = '日文';",
+                    "unexpected": true
+                }]
+            }),
+        );
+
+        let response = invoke_versioned_request(request);
+
+        assert_eq!(response["status"], json!("error"));
+        assert_eq!(response["error"]["code"], json!("native_operation_failed"));
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("unknown field `unexpected`"))
+        );
+    }
+
+    fn versioned_request(operation: &str, payload: Value) -> Value {
+        json!({
+            "envelope_version": crate::protocol::ENVELOPE_VERSION,
+            "abi_version": crate::protocol::ABI_VERSION,
+            "schema_version": crate::protocol::SCHEMA_VERSION,
+            "operation": operation,
+            "request_id": "javascript-ast-test",
+            "payload": payload,
+        })
+    }
+
+    fn invoke_versioned_request(request: Value) -> Value {
+        let output = crate::protocol::invoke_json(&request.to_string())
+            .expect("版本化 native 调用应返回 JSON");
+        serde_json::from_str(&output).expect("native 响应应是 JSON")
     }
 
     #[test]

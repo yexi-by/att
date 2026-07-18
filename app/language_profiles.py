@@ -142,27 +142,37 @@ def apply_language_profile_to_raw_config(
     *,
     raw_config: dict[str, object],
     source_language: SourceLanguage,
+    additional_source_languages: tuple[SourceLanguage, ...] = (),
 ) -> None:
     """把语言档案写入原始配置字典，后续 CLI 覆盖仍可继续覆盖这些值。"""
     profile = language_profile(source_language)
+    profiles = [profile, *(language_profile(language) for language in additional_source_languages)]
     text_translation = _read_or_create_section(raw_config, "text_translation")
     current_prompt_file = text_translation.get("system_prompt_file")
-    if (
-        not isinstance(current_prompt_file, str)
-        or current_prompt_file in BUILTIN_PROMPT_FILES
-    ):
+    if not isinstance(current_prompt_file, str) or current_prompt_file in BUILTIN_PROMPT_FILES:
         text_translation["system_prompt_file"] = profile.prompt_file
 
     text_rules = _read_or_create_section(raw_config, "text_rules")
     text_rules["source_language"] = profile.source_language
-    text_rules["source_residual_label"] = profile.residual_label
-    text_rules["source_text_required_pattern"] = profile.source_text_required_pattern
+    text_rules["additional_source_languages"] = list(additional_source_languages)
+    text_rules["source_residual_label"] = "/".join(item.residual_label for item in profiles)
+    text_rules["source_text_required_pattern"] = "|".join(
+        f"(?:{item.source_text_required_pattern})" for item in profiles
+    )
     text_rules["source_text_exclusion_profile"] = profile.source_text_exclusion_profile
-    text_rules["source_residual_segment_pattern"] = profile.source_residual_segment_pattern
-    text_rules["source_residual_allowed_chars"] = list(profile.source_residual_allowed_chars)
-    text_rules["source_residual_allowed_tail_chars"] = list(profile.source_residual_allowed_tail_chars)
-    text_rules["allowed_source_residual_terms"] = list(profile.allowed_source_residual_terms)
-    text_rules["source_residual_terms_ignore_case"] = profile.source_residual_terms_ignore_case
+    text_rules["source_residual_segment_pattern"] = "|".join(
+        f"(?:{item.source_residual_segment_pattern})" for item in profiles
+    )
+    text_rules["source_residual_allowed_chars"] = sorted(
+        {char for item in profiles for char in item.source_residual_allowed_chars}
+    )
+    text_rules["source_residual_allowed_tail_chars"] = sorted(
+        {char for item in profiles for char in item.source_residual_allowed_tail_chars}
+    )
+    text_rules["allowed_source_residual_terms"] = sorted(
+        {term for item in profiles for term in item.allowed_source_residual_terms}
+    )
+    text_rules["source_residual_terms_ignore_case"] = any(item.source_residual_terms_ignore_case for item in profiles)
 
 
 def resolve_profile_prompt_path(*, base_dir: Path, source_language: SourceLanguage) -> Path:

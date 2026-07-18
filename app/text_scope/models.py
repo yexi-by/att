@@ -80,33 +80,22 @@ class TextScopeResult:
     stale_plugin_rules: list[StalePluginRule] = field(default_factory=list)
     write_back_probe_error: str = ""
     write_back_probe_enabled: bool = False
+    translation_rule_fingerprint: str = ""
 
     @property
     def active_paths(self) -> set[str]:
         """返回当前会进入翻译集合的定位路径。"""
-        return {
-            entry.location_path
-            for entry in self.entries
-            if entry.enters_translation
-        }
+        return {entry.location_path for entry in self.entries if entry.enters_translation}
 
     @property
     def writable_paths(self) -> set[str]:
         """返回当前可写进游戏文件的定位路径。"""
-        return {
-            entry.location_path
-            for entry in self.entries
-            if entry.can_write_back
-        }
+        return {entry.location_path for entry in self.entries if entry.can_write_back}
 
     @property
     def unwritable_entries(self) -> list[TextScopeEntry]:
         """返回已经进入翻译集合但无法写进游戏文件的条目。"""
-        return [
-            entry
-            for entry in self.entries
-            if entry.enters_translation and not entry.can_write_back
-        ]
+        return [entry for entry in self.entries if entry.enters_translation and not entry.can_write_back]
 
     def active_items(self) -> list[TranslationItem]:
         """返回当前会进入翻译集合的条目。"""

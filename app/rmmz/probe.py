@@ -7,10 +7,9 @@
 2. 一旦发现孤立的 `401`，立即抛出异常，阻止后续翻译流程启动。
 """
 
+from app.observability.logging import logger
 from app.rmmz.game_data import CommonEvent, EventCommand, MapData, Troop
 from app.rmmz.schema import Code
-
-from app.observability.logging import logger
 
 
 def run_dialogue_probe(
@@ -45,9 +44,7 @@ def run_dialogue_probe(
             for page_index, page in enumerate(event.pages, start=1):
                 _check_command_list(
                     commands=page.commands,
-                    location_info=(
-                        f"{file_name} -> Event {event.id} -> Page {page_index}"
-                    ),
+                    location_info=(f"{file_name} -> Event {event.id} -> Page {page_index}"),
                 )
 
     for common_event in common_events:

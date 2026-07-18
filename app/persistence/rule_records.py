@@ -1,8 +1,8 @@
 """插件、事件指令、Note 标签和文本规则记录会话能力。"""
 
 import json
+from typing import cast
 
-from app.rule_review import RuleReviewDomain, parse_rule_review_domain
 from app.rmmz.schema import (
     EventCommandParameterFilter,
     EventCommandTextRuleRecord,
@@ -15,6 +15,7 @@ from app.rmmz.schema import (
     SourceResidualRuleRecord,
     StructuredPlaceholderRuleRecord,
 )
+from app.rule_review import RuleReviewDomain, parse_rule_review_domain
 
 from .records import RuleReviewStateRecord
 from .rows import decode_string_list, row_int, row_str
@@ -26,9 +27,9 @@ from .sql import (
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_PATHS,
     DELETE_ALL_MV_VIRTUAL_NAMEBOX_RULES,
     DELETE_ALL_NOTE_TAG_TEXT_RULES,
+    DELETE_ALL_PLACEHOLDER_RULES,
     DELETE_ALL_PLUGIN_SOURCE_RUNTIME_WRITE_MAPS,
     DELETE_ALL_PLUGIN_SOURCE_TEXT_RULES,
-    DELETE_ALL_PLACEHOLDER_RULES,
     DELETE_ALL_PLUGIN_TEXT_RULES,
     DELETE_ALL_SOURCE_RESIDUAL_RULES,
     DELETE_ALL_STRUCTURED_PLACEHOLDER_RULE_GROUPS,
@@ -39,8 +40,8 @@ from .sql import (
     INSERT_EVENT_COMMAND_TEXT_RULE_PATH,
     INSERT_MV_VIRTUAL_NAMEBOX_RULE,
     INSERT_NOTE_TAG_TEXT_RULE,
-    INSERT_PLUGIN_SOURCE_TEXT_RULE,
     INSERT_PLACEHOLDER_RULE,
+    INSERT_PLUGIN_SOURCE_TEXT_RULE,
     INSERT_PLUGIN_TEXT_RULE,
     INSERT_SOURCE_RESIDUAL_RULE,
     INSERT_STRUCTURED_PLACEHOLDER_RULE,
@@ -50,8 +51,8 @@ from .sql import (
     SELECT_EVENT_COMMAND_TEXT_RULE_PATHS,
     SELECT_MV_VIRTUAL_NAMEBOX_RULES,
     SELECT_NOTE_TAG_TEXT_RULES,
-    SELECT_PLUGIN_SOURCE_TEXT_RULES,
     SELECT_PLACEHOLDER_RULES,
+    SELECT_PLUGIN_SOURCE_TEXT_RULES,
     SELECT_PLUGIN_TEXT_RULES,
     SELECT_RULE_REVIEW_STATE,
     SELECT_SOURCE_RESIDUAL_RULES,
@@ -317,9 +318,9 @@ class RuleRecordSessionMixin(SessionMixinBase):
         groups_by_rule: dict[str, dict[str, str]] = {}
         for row in group_rows:
             rule_name = row_str(row, "rule_name", self.db_path)
-            groups_by_rule.setdefault(rule_name, {})[
-                row_str(row, "group_name", self.db_path)
-            ] = row_str(row, "placeholder_template", self.db_path)
+            groups_by_rule.setdefault(rule_name, {})[row_str(row, "group_name", self.db_path)] = row_str(
+                row, "placeholder_template", self.db_path
+            )
 
         return [
             StructuredPlaceholderRuleRecord(
@@ -420,13 +421,20 @@ class RuleRecordSessionMixin(SessionMixinBase):
         rule_domain: RuleReviewDomain,
         scope_hash: str,
         reviewed_empty: bool,
+        scope_contract_version: int = 1,
+        scope_payload: dict[str, object] | None = None,
     ) -> None:
         """保存外部规则已审查为空的状态。"""
+        if scope_contract_version <= 0:
+            raise ValueError("规则审查范围契约版本必须为正整数")
+        effective_payload = scope_payload or {"kind": "implicit_current"}
         _ = await self.connection.execute(
             UPSERT_RULE_REVIEW_STATE,
             (
                 rule_domain,
                 scope_hash,
+                scope_contract_version,
+                json.dumps(effective_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
                 1 if reviewed_empty else 0,
                 current_timestamp_text(),
             ),
@@ -448,9 +456,17 @@ class RuleRecordSessionMixin(SessionMixinBase):
             row = await cursor.fetchone()
         if row is None:
             return None
+        payload_raw = cast(object, json.loads(row_str(row, "scope_payload_json", self.db_path)))
+        if not isinstance(payload_raw, dict):
+            raise RuntimeError(f"rule_review_states.scope_payload_json 非法: {self.db_path}")
+        payload = cast(dict[object, object], payload_raw)
+        if not all(isinstance(key, str) for key in payload):
+            raise RuntimeError(f"rule_review_states.scope_payload_json 键非法: {self.db_path}")
         return RuleReviewStateRecord(
             rule_domain=parse_rule_review_domain(row_str(row, "rule_domain", self.db_path)),
             scope_hash=row_str(row, "scope_hash", self.db_path),
+            scope_contract_version=row_int(row, "scope_contract_version", self.db_path),
+            scope_payload=cast(dict[str, object], payload),
             reviewed_empty=row_int(row, "reviewed_empty", self.db_path) == 1,
             updated_at=row_str(row, "updated_at", self.db_path),
         )

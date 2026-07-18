@@ -1,5 +1,6 @@
 """源语言类型与校验工具。"""
 
+from collections.abc import Iterable
 from typing import Literal
 
 type SourceLanguage = Literal["ja", "en"]
@@ -31,6 +32,21 @@ def source_language_label(source_language: SourceLanguage) -> str:
     return labels[source_language]
 
 
+def normalize_additional_source_languages(
+    *,
+    source_language: SourceLanguage,
+    additional_source_languages: Iterable[str],
+) -> tuple[SourceLanguage, ...]:
+    """校验、去重并稳定排序注册时附加的源语言。"""
+    normalized: set[SourceLanguage] = set()
+    for raw_language in additional_source_languages:
+        language = parse_source_language(raw_language)
+        if language == source_language:
+            raise ValueError("追加源语言不能与主源语言相同")
+        normalized.add(language)
+    return tuple(sorted(normalized))
+
+
 __all__: list[str] = [
     "DEFAULT_SOURCE_LANGUAGE",
     "DEFAULT_TARGET_LANGUAGE",
@@ -39,5 +55,6 @@ __all__: list[str] = [
     "SourceTextExclusionProfile",
     "TargetLanguage",
     "parse_source_language",
+    "normalize_additional_source_languages",
     "source_language_label",
 ]

@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from app.event_command_text import EventCommandTextExtraction
 from app.note_tag_text import NoteTagTextExtraction
-from app.persistence import TargetGameSession
-from app.plugin_text import PluginTextExtraction
 from app.plugin_source_text import PluginSourceTextExtraction, filter_fresh_plugin_source_text_rules
 from app.plugin_source_text.models import PluginSourceScan
-from app.plugin_source_text.scanner import build_plugin_source_scan
+from app.plugin_text import PluginTextExtraction
 from app.rmmz import DataTextExtraction
 from app.rmmz.schema import (
+    PLUGINS_FILE_NAME,
     EventCommandTextRuleRecord,
     GameData,
     MvVirtualNameboxRuleRecord,
     NoteTagTextRuleRecord,
-    PLUGINS_FILE_NAME,
     PluginSourceTextRuleRecord,
     PluginTextRuleRecord,
     TranslationData,
@@ -23,8 +24,15 @@ from app.rmmz.schema import (
 )
 from app.rmmz.text_rules import TextRules
 
-from .models import TextScopeEntry, TextScopeResult, TextScopeRuleHit, TextSourceType, WriteBackProbeError
-from .plugin_rules import read_fresh_plugin_text_rules
+from .indexes import TextScopeAnalysisIndex
+from .models import (
+    StalePluginRule,
+    TextScopeEntry,
+    TextScopeResult,
+    TextScopeRuleHit,
+    TextSourceType,
+    WriteBackProbeError,
+)
 from .rule_hits import collect_event_command_rule_hits, collect_note_tag_rule_hits, collect_plugin_rule_hits
 from .write_probe import collect_write_back_probe_reasons
 
@@ -32,37 +40,27 @@ from .write_probe import collect_write_back_probe_reasons
 class TextScopeService:
     """构建当前游戏统一文本范围。"""
 
-    async def build(
+    def build_from_loaded_rules(
         self,
         *,
-        session: TargetGameSession,
         game_data: GameData,
         text_rules: TextRules,
-        translated_items: list[TranslationItem] | None = None,
+        plugin_rules: list[PluginTextRuleRecord],
+        stale_plugin_rules: list[StalePluginRule],
+        event_rules: list[EventCommandTextRuleRecord],
+        plugin_source_rule_records: list[PluginSourceTextRuleRecord],
+        plugin_source_scan: PluginSourceScan,
+        note_tag_rules: list[NoteTagTextRuleRecord],
+        mv_virtual_namebox_rules: list[MvVirtualNameboxRuleRecord],
+        translated_items: list[TranslationItem],
+        analysis_index: TextScopeAnalysisIndex,
         include_write_probe: bool = False,
     ) -> TextScopeResult:
-        """读取规则、展开命中项，并按需生成写入可行性信息。"""
-        plugin_rules, stale_plugin_rules = await read_fresh_plugin_text_rules(
-            session=session,
-            game_data=game_data,
-        )
-        event_rules = await session.read_event_command_text_rules()
-        plugin_source_rule_records = await session.read_plugin_source_text_rules()
-        plugin_source_scan = (
-            build_plugin_source_scan(game_data=game_data, text_rules=text_rules)
-            if plugin_source_rule_records
-            else None
-        )
+        """使用单命令已加载事实构建文本范围，不再读库或扫描 AST。"""
         plugin_source_rules, _stale_plugin_source_rules = filter_fresh_plugin_source_text_rules(
-            game_data=game_data,
             rule_records=plugin_source_rule_records,
-            text_rules=text_rules,
             scan=plugin_source_scan,
         )
-        note_tag_rules = await session.read_note_tag_text_rules()
-        mv_virtual_namebox_rules = await session.read_mv_virtual_namebox_rules()
-        if translated_items is None:
-            translated_items = await session.read_translated_items()
         translated_paths = {item.location_path for item in translated_items}
 
         translation_data_map = build_translation_data_map(
@@ -74,6 +72,7 @@ class TextScopeService:
             plugin_source_scan=plugin_source_scan,
             note_tag_rules=note_tag_rules,
             mv_virtual_namebox_rules=mv_virtual_namebox_rules,
+            analysis_index=analysis_index,
         )
         active_items = {
             item.location_path: item
@@ -102,15 +101,15 @@ class TextScopeService:
 
         rule_hits = [
             *collect_plugin_rule_hits(
-                game_data=game_data,
+                plugin_index=analysis_index.plugin_parameters,
                 plugin_rules=plugin_rules,
             ),
             *collect_event_command_rule_hits(
-                game_data=game_data,
+                command_index=analysis_index.event_commands,
                 event_rules=event_rules,
             ),
             *collect_note_tag_rule_hits(
-                game_data=game_data,
+                note_sources=analysis_index.note_sources,
                 note_tag_rules=note_tag_rules,
                 text_rules=text_rules,
             ),
@@ -134,7 +133,59 @@ class TextScopeService:
             stale_plugin_rules=stale_plugin_rules,
             write_back_probe_error=write_back_probe_error,
             write_back_probe_enabled=include_write_probe,
+            translation_rule_fingerprint=_build_translation_rule_fingerprint(
+                text_rules=text_rules,
+                plugin_rules=plugin_rules,
+                event_rules=event_rules,
+                plugin_source_rules=plugin_source_rule_records,
+                note_tag_rules=note_tag_rules,
+                mv_virtual_namebox_rules=mv_virtual_namebox_rules,
+            ),
         )
+
+
+def _build_translation_rule_fingerprint(
+    *,
+    text_rules: TextRules,
+    plugin_rules: list[PluginTextRuleRecord],
+    event_rules: list[EventCommandTextRuleRecord],
+    plugin_source_rules: list[PluginSourceTextRuleRecord],
+    note_tag_rules: list[NoteTagTextRuleRecord],
+    mv_virtual_namebox_rules: list[MvVirtualNameboxRuleRecord],
+) -> str:
+    """对会影响提取、占位符和提示上下文的规则生成稳定指纹。"""
+    payload = {
+        "text_rules_setting": text_rules.setting.model_dump(mode="json"),
+        "custom_placeholder_rules": [
+            {
+                "pattern_text": rule.pattern_text,
+                "placeholder_template": rule.placeholder_template,
+            }
+            for rule in text_rules.custom_placeholder_rules
+        ],
+        "structured_placeholder_rules": [
+            {
+                "rule_name": rule.rule_name,
+                "rule_type": rule.rule_type,
+                "pattern_text": rule.pattern_text,
+                "translatable_group": rule.translatable_group,
+                "protected_groups": rule.protected_groups,
+            }
+            for rule in text_rules.structured_placeholder_rules
+        ],
+        "plugin_rules": [record.model_dump(mode="json") for record in plugin_rules],
+        "event_rules": [record.model_dump(mode="json") for record in event_rules],
+        "plugin_source_rules": [record.model_dump(mode="json") for record in plugin_source_rules],
+        "note_tag_rules": [record.model_dump(mode="json") for record in note_tag_rules],
+        "mv_virtual_namebox_rules": [record.model_dump(mode="json") for record in mv_virtual_namebox_rules],
+    }
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def build_translation_data_map(
@@ -145,22 +196,30 @@ def build_translation_data_map(
     event_rules: list[EventCommandTextRuleRecord],
     plugin_source_rules: list[PluginSourceTextRuleRecord],
     note_tag_rules: list[NoteTagTextRuleRecord],
-    mv_virtual_namebox_rules: list[MvVirtualNameboxRuleRecord] | None = None,
-    plugin_source_scan: PluginSourceScan | None = None,
+    mv_virtual_namebox_rules: list[MvVirtualNameboxRuleRecord],
+    plugin_source_scan: PluginSourceScan,
+    analysis_index: TextScopeAnalysisIndex,
 ) -> dict[str, TranslationData]:
     """按同一组规则构建当前可翻译文本集合。"""
+    command_snapshots = tuple(
+        (entry.location_path, entry.display_name, entry.command) for entry in analysis_index.event_commands
+    )
     translation_data_map = DataTextExtraction(
         game_data,
         text_rules,
         mv_virtual_namebox_rule_records=mv_virtual_namebox_rules,
-    ).extract_all_text()
+    ).extract_all_text_from_command_snapshots(command_snapshots)
     merge_translation_data_map(
         translation_data_map,
-        EventCommandTextExtraction(game_data, event_rules, text_rules).extract_all_text(),
+        EventCommandTextExtraction(game_data, event_rules, text_rules).extract_all_text_from_index(
+            analysis_index.event_commands
+        ),
     )
     merge_translation_data_map(
         translation_data_map,
-        PluginTextExtraction(game_data, plugin_rules, text_rules).extract_all_text(),
+        PluginTextExtraction(game_data, plugin_rules, text_rules).extract_all_text_from_index(
+            analysis_index.plugin_parameters
+        ),
     )
     merge_translation_data_map(
         translation_data_map,
@@ -173,7 +232,9 @@ def build_translation_data_map(
     )
     merge_translation_data_map(
         translation_data_map,
-        NoteTagTextExtraction(game_data, note_tag_rules, text_rules).extract_all_text(),
+        NoteTagTextExtraction(game_data, note_tag_rules, text_rules).extract_all_text_from_sources(
+            analysis_index.note_sources
+        ),
     )
     return translation_data_map
 

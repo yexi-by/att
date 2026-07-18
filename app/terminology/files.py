@@ -90,7 +90,9 @@ async def export_terminology_artifacts(
         entry_count=registry.total_entry_count(),
         speaker_entry_count=len(registry.speaker_names),
         map_entry_count=len(registry.map_display_names),
-        database_entry_count=registry.total_entry_count() - len(registry.speaker_names) - len(registry.map_display_names),
+        database_entry_count=registry.total_entry_count()
+        - len(registry.speaker_names)
+        - len(registry.map_display_names),
         sample_file_count=len(speaker_contexts),
     )
 

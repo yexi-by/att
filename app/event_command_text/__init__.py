@@ -14,12 +14,20 @@ from .importer import (
     load_event_command_rule_import_file,
     parse_event_command_rule_import_text,
 )
+from .index import (
+    EventCommandAnalysisEntry,
+    build_event_command_analysis_index,
+    event_command_analysis_snapshots,
+)
 
 __all__: list[str] = [
     "EventCommandRuleImportFile",
     "EventCommandRuleSpec",
+    "EventCommandAnalysisEntry",
     "EventCommandTextExtraction",
     "build_event_command_rule_records_from_import",
+    "build_event_command_analysis_index",
+    "event_command_analysis_snapshots",
     "command_matches_filters",
     "event_command_rule_key",
     "export_event_commands_json_file",

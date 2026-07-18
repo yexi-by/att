@@ -14,18 +14,27 @@ from app.application.handler import (
     TerminologyWriteSummary,
     TextTranslationSummary,
     WriteBackSummary,
+    WriteTransactionRecoverySummary,
 )
 from app.cli.arguments import read_optional_path_arg
 from app.observability import logger
 from app.rmmz.json_types import JsonArray, JsonObject, JsonValue
-
 
 REPORT_STDOUT_SAMPLE_LIMIT = 20
 
 
 def build_translate_summary_report(summary: TextTranslationSummary) -> AgentReport:
     """把正文翻译摘要转换为稳定 JSON 报告。"""
+    errors: list[AgentIssue] = []
     warnings: list[AgentIssue] = []
+    if summary.is_blocked:
+        error_code = "translation_blocked" if summary.stop_code == "none" else summary.stop_code
+        errors.append(
+            issue(
+                error_code,
+                summary.stop_message or summary.blocked_reason or "正文翻译未完成",
+            )
+        )
     if summary.has_errors:
         warnings.append(
             issue(
@@ -34,18 +43,9 @@ def build_translate_summary_report(summary: TextTranslationSummary) -> AgentRepo
             )
         )
     return AgentReport.from_parts(
-        errors=[],
+        errors=errors,
         warnings=warnings,
-        summary={
-            "run_id": summary.run_id,
-            "total_extracted_items": summary.total_extracted_items,
-            "pending_count": summary.pending_count,
-            "deduplicated_count": summary.deduplicated_count,
-            "batch_count": summary.batch_count,
-            "success_count": summary.success_count,
-            "quality_error_count": summary.error_count,
-            "llm_failure_count": summary.llm_failure_count,
-        },
+        summary=_build_translation_summary_object(summary),
         details={},
     )
 
@@ -81,14 +81,7 @@ def build_run_all_summary_report(
     """把 `run-all` 翻译和写文件结果转换为稳定 JSON 报告。"""
     write_back_performed = write_back_summary is not None
     summary: JsonObject = {
-        "run_id": text_summary.run_id,
-        "total_extracted_items": text_summary.total_extracted_items,
-        "pending_count": text_summary.pending_count,
-        "deduplicated_count": text_summary.deduplicated_count,
-        "batch_count": text_summary.batch_count,
-        "success_count": text_summary.success_count,
-        "quality_error_count": text_summary.error_count,
-        "llm_failure_count": text_summary.llm_failure_count,
+        **_build_translation_summary_object(text_summary),
         "write_back_performed": write_back_performed,
         "write_back_skipped": not write_back_performed,
         "write_back_planned_file_count": 0,
@@ -113,7 +106,27 @@ def build_run_all_summary_report(
             }
         )
         details["write_back"] = write_summary
-    return AgentReport.from_parts(errors=[], warnings=[], summary=summary, details=details)
+    errors: list[AgentIssue] = []
+    warnings: list[AgentIssue] = []
+    if text_summary.is_blocked:
+        message = (
+            text_summary.stop_message or text_summary.blocked_reason or "正文翻译没有干净完成，因此没有执行 write-back"
+        )
+        error_code = "translation_blocked" if text_summary.stop_code == "none" else text_summary.stop_code
+        errors.append(issue(error_code, message))
+    elif text_summary.has_errors:
+        warnings.append(
+            issue(
+                "translation_quality_errors",
+                f"本轮有 {text_summary.error_count} 条译文未通过检查，已跳过 write-back",
+            )
+        )
+    return AgentReport.from_parts(
+        errors=errors,
+        warnings=warnings,
+        summary=summary,
+        details=details,
+    )
 
 
 def build_font_restore_summary_report(summary: FontRestoreSummary) -> AgentReport:
@@ -135,6 +148,27 @@ def build_font_restore_summary_report(summary: FontRestoreSummary) -> AgentRepor
     )
 
 
+def build_write_transaction_recovery_summary_report(
+    summary: WriteTransactionRecoverySummary,
+) -> AgentReport:
+    """把文件写事务恢复结果转换为稳定 JSON 报告。"""
+    warnings: list[AgentIssue] = []
+    if summary.final_state == "none":
+        warnings.append(issue("write_transaction_not_found", "当前游戏没有未完成写事务"))
+    return AgentReport.from_parts(
+        errors=[],
+        warnings=warnings,
+        summary={
+            "transaction_id": summary.transaction_id or "",
+            "previous_state": summary.previous_state or "",
+            "final_state": summary.final_state,
+            "restored_file_count": summary.restored_file_count,
+            "finalized_committed_file_count": summary.finalized_committed_file_count,
+        },
+        details={},
+    )
+
+
 def build_sampled_stdout_report(
     report: AgentReport,
     *,
@@ -147,6 +181,7 @@ def build_sampled_stdout_report(
         warnings=list(report.warnings),
         summary=dict(report.summary),
         details=_summarize_json_object(report.details, sample_limit=sample_limit),
+        diagnostics=report.diagnostics,
     )
 
 
@@ -170,10 +205,7 @@ def _summarize_json_value(value: JsonValue, *, sample_limit: int) -> JsonValue:
 def _summarize_json_array(value: JsonArray, *, sample_limit: int) -> JsonObject:
     """把数组转换为计数、样例和省略数量。"""
     effective_limit = max(0, sample_limit)
-    samples: JsonArray = [
-        _summarize_json_value(item, sample_limit=sample_limit)
-        for item in value[:effective_limit]
-    ]
+    samples: JsonArray = [_summarize_json_value(item, sample_limit=sample_limit) for item in value[:effective_limit]]
     return {
         "count": len(value),
         "samples": samples,
@@ -208,13 +240,34 @@ def _build_translation_summary_object(summary: TextTranslationSummary) -> JsonOb
     """构建正文翻译摘要 JSON 对象。"""
     return {
         "run_id": summary.run_id,
+        "outcome": summary.outcome,
+        "stop_code": summary.stop_code,
+        "stop_message": summary.stop_message,
         "total_extracted_items": summary.total_extracted_items,
         "pending_count": summary.pending_count,
+        "selected_count": summary.selected_count,
+        "remaining_count": summary.remaining_count,
+        "limit_reason": summary.limit_reason,
         "deduplicated_count": summary.deduplicated_count,
         "batch_count": summary.batch_count,
+        "planned_batch_count": summary.batch_count,
         "success_count": summary.success_count,
         "quality_error_count": summary.error_count,
         "llm_failure_count": summary.llm_failure_count,
+        "dispatched_batch_count": summary.dispatched_batch_count,
+        "completed_batch_count": summary.completed_batch_count,
+        "undispatched_batch_count": summary.undispatched_batch_count,
+        "cancelled_batch_count": summary.cancelled_batch_count,
+        "waiting_permission_cancelled_count": summary.waiting_permission_cancelled_count,
+        "inflight_cancelled_count": summary.inflight_cancelled_count,
+        "completed_after_stop_count": summary.completed_after_stop_count,
+        "reused_current_run_count": summary.reused_current_run_count,
+        "reused_saved_count": summary.reused_saved_count,
+        "context_conflict_count": summary.context_conflict_count,
+        "rejected_reuse_count": summary.rejected_reuse_count,
+        "physical_request_count": summary.physical_request_count,
+        "retry_request_count": summary.retry_request_count,
+        "elapsed_ms": summary.elapsed_ms,
     }
 
 
@@ -239,6 +292,7 @@ def _build_write_back_summary_object(summary: WriteBackSummary) -> JsonObject:
         "post_write_audit_ms": summary.post_write_audit_ms,
     }
 
+
 __all__ = [
     "build_font_restore_summary_report",
     "build_run_all_summary_report",
@@ -246,6 +300,7 @@ __all__ = [
     "build_terminology_write_summary_report",
     "build_translate_summary_report",
     "build_write_back_summary_report",
+    "build_write_transaction_recovery_summary_report",
     "REPORT_STDOUT_SAMPLE_LIMIT",
     "write_report_outputs",
 ]

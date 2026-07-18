@@ -12,14 +12,16 @@ from app.agent_toolkit.reports import issue
 from app.cli.arguments import (
     read_bool_arg,
     read_int_set_arg,
+    read_optional_int_list_arg,
     read_optional_str_list_arg,
     read_optional_text_source_arg,
     read_required_path_arg,
     read_required_text_source_arg,
     read_text_file,
 )
-from app.cli.runtime import HandlerSession, resolve_optional_target_game_title, resolve_target_game_title
 from app.cli.reports import build_sampled_stdout_report, write_report_outputs
+from app.cli.runtime import HandlerSession, resolve_optional_target_game_title, resolve_target_game_title
+from app.persistence import RecoveryRequiredError
 from app.rmmz.text_rules import JsonObject
 
 
@@ -54,6 +56,8 @@ async def run_import_plugin_rules_command(args: argparse.Namespace) -> int:
                 input_path=input_path,
                 confirm_empty=read_bool_arg(args, "confirm_empty"),
             )
+    except RecoveryRequiredError:
+        raise
     except Exception as error:
         report = AgentReport.from_parts(
             errors=[issue("plugin_rules_invalid", f"插件规则导入失败: {type(error).__name__}: {error}")],
@@ -95,6 +99,10 @@ async def run_export_event_commands_json_command(args: argparse.Namespace) -> in
             game_title=game_title,
             output_path=output_path,
             command_codes=command_codes,
+            default_command_codes_override=read_optional_int_list_arg(
+                args,
+                "event_command_default_codes",
+            ),
         )
     report = AgentReport.from_parts(
         errors=[],
@@ -122,7 +130,13 @@ async def run_import_event_command_rules_command(args: argparse.Namespace) -> in
                 input_path=input_path,
                 confirm_empty=read_bool_arg(args, "confirm_empty"),
                 command_codes=command_codes,
+                default_command_codes_override=read_optional_int_list_arg(
+                    args,
+                    "event_command_default_codes",
+                ),
             )
+    except RecoveryRequiredError:
+        raise
     except Exception as error:
         report = AgentReport.from_parts(
             errors=[issue("event_command_rules_invalid", f"事件指令规则导入失败: {type(error).__name__}: {error}")],
@@ -236,7 +250,12 @@ async def run_scan_placeholder_candidates_command(args: argparse.Namespace) -> i
         game_title=game_title,
         custom_placeholder_rules_text=placeholder_rules_text,
     )
-    write_report_outputs(report=report, args=args, title="自定义控制符候选报告")
+    write_report_outputs(
+        report=report,
+        args=args,
+        title="自定义控制符候选报告",
+        stdout_report=build_sampled_stdout_report(report),
+    )
     return 1 if report.status == "error" else 0
 
 
@@ -303,7 +322,12 @@ async def run_scan_structured_placeholder_candidates_command(args: argparse.Name
         game_title=game_title,
         rules_text=rules_text,
     )
-    write_report_outputs(report=report, args=args, title="结构化占位符覆盖扫描报告")
+    write_report_outputs(
+        report=report,
+        args=args,
+        title="结构化占位符覆盖扫描报告",
+        stdout_report=build_sampled_stdout_report(report),
+    )
     return 1 if report.status == "error" else 0
 
 

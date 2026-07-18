@@ -8,39 +8,35 @@ from typing import NoReturn, cast
 
 import pytest
 
-from app.application.handler import TranslationHandler
+from app.agent_toolkit.placeholder_scan import analyze_structured_placeholder_candidates
 from app.application.errors import WriteBackGateError
-from app.application.summaries import WriteBackSummary
-from app.application.flow_gate import note_tag_rule_scope_hash_for_text_rules, structured_placeholder_scope_hash
-from app.application.flow_gate import event_command_rule_scope_hash_for_setting
-from app.application.font_replacement import (
-    apply_font_replacement,
-    read_plugins_js_file,
-    restore_font_references_from_origin_backups,
+from app.application.flow_gate import (
+    event_command_rule_codes_for_setting,
+    event_command_rule_scope_hash_for_setting,
+    note_tag_rule_scope_hash_for_text_rules,
+    structured_placeholder_scope_hash_from_analysis,
 )
+from app.application.font_replacement.files import read_plugins_js_file
+from app.application.handler import TranslationHandler, build_translation_reuse_contexts_by_path
+from app.application.summaries import WriteBackSummary
 from app.config import SettingOverrides
 from app.config.schemas import Setting, TextRulesSetting, WriteBackSetting
-from app.note_tag_text import NoteTagTextExtraction, build_note_tag_rule_records_from_import
-from app.note_tag_text.exporter import collect_note_tag_candidates
+from app.game_analysis import build_game_analysis_context
 from app.llm import LLMHandler
 from app.native_write_plan import NativePlannedFile, NativeWriteBackPlan, NativeWriteBackSummary
+from app.note_tag_text import NoteTagTextExtraction, build_note_tag_rule_records_from_import
+from app.note_tag_text.exporter import collect_note_tag_candidates
 from app.persistence import GameRegistry, TargetGameSession
-from app.plugin_text import build_plugin_hash
+from app.persistence.records import WriteTransactionPayload, WriteTransactionRecord
 from app.plugin_source_text import (
     ActiveRuntimePluginSourceAudit,
     ActiveRuntimePluginSourceIssue,
+    build_plugin_source_raw_index,
     build_plugin_source_rule_records_from_import,
-    build_plugin_source_scan,
+    derive_plugin_source_scan,
     parse_plugin_source_rule_import_text,
 )
-from app.rule_review import (
-    EVENT_COMMAND_TEXT_RULE_DOMAIN,
-    NOTE_TAG_TEXT_RULE_DOMAIN,
-    PLACEHOLDER_RULE_DOMAIN,
-    PLUGIN_TEXT_RULE_DOMAIN,
-    STRUCTURED_PLACEHOLDER_RULE_DOMAIN,
-    plugin_rule_scope_hash,
-)
+from app.plugin_text import build_plugin_hash
 from app.rmmz import (
     DataTextExtraction,
     GameFileView,
@@ -52,12 +48,12 @@ from app.rmmz import (
 )
 from app.rmmz.control_codes import CustomPlaceholderRule
 from app.rmmz.schema import (
+    PLUGINS_FILE_NAME,
     EventCommandParameterFilter,
     EventCommandTextRuleRecord,
     GameData,
     MvVirtualNameboxRuleRecord,
     NoteTagTextRuleRecord,
-    PLUGINS_FILE_NAME,
     PlaceholderRuleRecord,
     PluginSourceRuntimeWriteMapRecord,
     PluginTextRuleRecord,
@@ -65,9 +61,27 @@ from app.rmmz.schema import (
     TranslationItem,
 )
 from app.rmmz.source_snapshot import validate_source_snapshot_manifest
-from app.rmmz.text_rules import JsonValue, TextRules, coerce_json_value, ensure_json_array, ensure_json_object, get_default_text_rules
-from app.terminology import TerminologyGlossary, TerminologyRegistry
-from app.text_scope import TextScopeService
+from app.rmmz.text_rules import (
+    JsonValue,
+    TextRules,
+    coerce_json_value,
+    ensure_json_array,
+    ensure_json_object,
+    get_default_text_rules,
+)
+from app.rule_review import (
+    EVENT_COMMAND_TEXT_RULE_DOMAIN,
+    NOTE_TAG_TEXT_RULE_DOMAIN,
+    PLACEHOLDER_RULE_DOMAIN,
+    PLUGIN_TEXT_RULE_DOMAIN,
+    STRUCTURED_PLACEHOLDER_RULE_DOMAIN,
+    plugin_rule_scope_hash,
+    plugin_source_rule_scope_hash,
+    plugin_source_text_rules_hash,
+)
+from app.terminology import TerminologyGlossary, TerminologyPromptIndex, TerminologyRegistry
+from app.text_scope import TextScopeResult
+from app.translation import TranslationCache, prepare_translation_cache_for_scope
 from app.utils.config_loader_utils import load_setting
 from tests._native_write_plan_helper import reset_writable_copies, write_data_text, write_game_files
 
@@ -172,7 +186,10 @@ async def _prepare_write_gate_session(
 ) -> tuple[GameData, Setting, TextRules]:
     """让最小游戏通过写文件前置规则，便于测试特定写入风险。"""
     game_data = await load_game_data(game_dir)
-    setting = load_setting(source_language=session.source_language)
+    setting = load_setting(
+        source_language=session.source_language,
+        additional_source_languages=session.additional_source_languages,
+    )
     placeholder_record = PlaceholderRuleRecord(
         pattern_text=r"(?i)\\F\d*\[[^\]\r\n]+\]",
         placeholder_template="[CUSTOM_FACE_PORTRAIT_{index}]",
@@ -192,6 +209,17 @@ async def _prepare_write_gate_session(
         ),
         structured_placeholder_rules=(),
     )
+    plugin_source_scan = derive_plugin_source_scan(
+        index=build_plugin_source_raw_index(game_data=game_data),
+        text_rules=text_rules,
+    )
+    await session.replace_plugin_source_assessment(
+        source_hash=plugin_source_rule_scope_hash(scan=plugin_source_scan),
+        text_rules_hash=plugin_source_text_rules_hash(text_rules),
+        high_risk=plugin_source_scan.risk.high_risk,
+        candidate_count=len(plugin_source_scan.candidates),
+        summary=plugin_source_scan.risk_report_json(),
+    )
     await session.replace_rule_review_state(
         rule_domain=PLUGIN_TEXT_RULE_DOMAIN,
         scope_hash=plugin_rule_scope_hash(game_data),
@@ -203,6 +231,15 @@ async def _prepare_write_gate_session(
             game_data=game_data,
             setting=setting,
         ),
+        scope_payload={
+            "kind": "event_command_codes",
+            "command_codes": sorted(
+                event_command_rule_codes_for_setting(
+                    game_data=game_data,
+                    setting=setting,
+                )
+            ),
+        },
         reviewed_empty=True,
     )
     await session.replace_rule_review_state(
@@ -213,16 +250,16 @@ async def _prepare_write_gate_session(
         ),
         reviewed_empty=True,
     )
-    scope = await TextScopeService().build(
+    analysis_context = await build_game_analysis_context(
         session=session,
         game_data=game_data,
         text_rules=text_rules,
     )
+    scope = analysis_context.scope
     await session.replace_rule_review_state(
         rule_domain=STRUCTURED_PLACEHOLDER_RULE_DOMAIN,
-        scope_hash=structured_placeholder_scope_hash(
-            translation_data_map=scope.translation_data_map,
-            structured_rules=(),
+        scope_hash=structured_placeholder_scope_hash_from_analysis(
+            analyze_structured_placeholder_candidates(scope.translation_data_map, text_rules)
         ),
         reviewed_empty=True,
     )
@@ -234,6 +271,50 @@ async def _prepare_write_gate_session(
     return game_data, setting, text_rules
 
 
+async def _write_current_translation_items(
+    *,
+    session: TargetGameSession,
+    game_data: GameData,
+    setting: Setting,
+    text_rules: TextRules,
+    scope: TextScopeResult,
+    items: list[TranslationItem],
+) -> None:
+    """按生产上下文契约保存测试译文，不伪造旧版无指纹记录。"""
+    plugin_source_scan = derive_plugin_source_scan(
+        index=build_plugin_source_raw_index(game_data=game_data),
+        text_rules=text_rules,
+    )
+    await session.replace_plugin_source_assessment(
+        source_hash=plugin_source_rule_scope_hash(scan=plugin_source_scan),
+        text_rules_hash=plugin_source_text_rules_hash(text_rules),
+        high_risk=plugin_source_scan.risk.high_risk,
+        candidate_count=len(plugin_source_scan.candidates),
+        summary=plugin_source_scan.risk_report_json(),
+    )
+    glossary = await session.read_terminology_glossary()
+    if glossary is None:
+        raise RuntimeError("测试写译文前必须准备术语表")
+    translation_cache = TranslationCache()
+    prepare_translation_cache_for_scope(
+        translation_cache=translation_cache,
+        scope=scope,
+        terminology_prompt_index=TerminologyPromptIndex.from_glossary(glossary, game_data=game_data),
+        source_language=setting.text_rules.source_language,
+        additional_source_languages=setting.text_rules.additional_source_languages,
+        target_language=session.target_language,
+        source_snapshot_records=await session.read_source_snapshot_records(),
+        source_residual_records=await session.read_source_residual_rules(),
+    )
+    await session.write_translation_items(
+        items,
+        reuse_contexts_by_path=build_translation_reuse_contexts_by_path(
+            translation_cache=translation_cache,
+            items=items,
+        ),
+    )
+
+
 class _NativePlanSessionStub:
     """测试 Rust 写回计划应用层协议的会话桩。"""
 
@@ -242,14 +323,19 @@ class _NativePlanSessionStub:
     content_root: Path
     runtime_map_replace_count: int
     runtime_map_replace_calls: int
+    font_record_replace_count: int
+    write_transaction_record: WriteTransactionRecord | None
 
     def __init__(self, tmp_path: Path) -> None:
         """初始化可满足写回 helper 的最小会话字段。"""
         self.game_path = tmp_path / "game"
         self.db_path = tmp_path / "game.db"
         self.content_root = tmp_path / "game"
+        self.content_root.mkdir(parents=True)
         self.runtime_map_replace_count = 0
         self.runtime_map_replace_calls = 0
+        self.font_record_replace_count = 0
+        self.write_transaction_record = None
 
     async def replace_plugin_source_runtime_write_maps(self, records: list[object]) -> None:
         """记录插件源码当前运行映射是否被替换。"""
@@ -259,6 +345,82 @@ class _NativePlanSessionStub:
     async def replace_font_replacement_records(self, records: list[object]) -> None:
         """测试中不触发字体记录替换。"""
         _ = records
+
+    async def create_write_transaction(self, record: WriteTransactionRecord) -> None:
+        """记录文件暂存前持久化的 preparing 状态。"""
+        assert self.write_transaction_record is None
+        assert record.state == "preparing"
+        assert record.payload is None
+        self.write_transaction_record = record
+
+    async def read_write_transaction(self, transaction_id: str) -> WriteTransactionRecord | None:
+        """读取测试会话中的当前写事务。"""
+        record = self.write_transaction_record
+        if record is None or record.transaction_id != transaction_id:
+            return None
+        return record
+
+    async def mark_write_transaction_prepared(
+        self,
+        transaction_id: str,
+        payload: WriteTransactionPayload,
+    ) -> None:
+        """记录暂存完成后的数据库恢复清单。"""
+        assert self.write_transaction_record is not None
+        assert transaction_id == self.write_transaction_record.transaction_id
+        assert not payload.database_committed
+        self.write_transaction_record.state = "prepared"
+        self.write_transaction_record.payload = payload
+
+    async def finalize_write_transaction_commit(
+        self,
+        *,
+        transaction_id: str,
+        runtime_maps: list[PluginSourceRuntimeWriteMapRecord],
+        font_records: list[object] | None,
+    ) -> None:
+        """模拟诊断映射和 committed 状态的原子提交。"""
+        assert self.write_transaction_record is not None
+        assert transaction_id == self.write_transaction_record.transaction_id
+        self.runtime_map_replace_calls += 1
+        self.runtime_map_replace_count = len(runtime_maps)
+        if font_records is not None:
+            self.font_record_replace_count = len(font_records)
+        assert self.write_transaction_record.payload is not None
+        self.write_transaction_record.payload = WriteTransactionPayload(
+            version=self.write_transaction_record.payload.version,
+            database_committed=True,
+            files=self.write_transaction_record.payload.files,
+        )
+        self.write_transaction_record.state = "committed"
+
+    async def mark_write_transaction_finalized(self, transaction_id: str) -> None:
+        """记录文件事务产物已清理。"""
+        assert self.write_transaction_record is not None
+        assert transaction_id == self.write_transaction_record.transaction_id
+        self.write_transaction_record.state = "finalized"
+
+    async def mark_write_transaction_rolled_back(
+        self,
+        transaction_id: str,
+        error: str = "",
+    ) -> None:
+        """记录失败路径已恢复原文件。"""
+        assert self.write_transaction_record is not None
+        assert transaction_id == self.write_transaction_record.transaction_id
+        self.write_transaction_record.state = "rolled_back"
+        self.write_transaction_record.error = error
+
+    async def mark_write_transaction_recovery_required(
+        self,
+        transaction_id: str,
+        error: str,
+    ) -> None:
+        """记录无法自动恢复的测试失败。"""
+        assert self.write_transaction_record is not None
+        assert transaction_id == self.write_transaction_record.transaction_id
+        self.write_transaction_record.state = "recovery_required"
+        self.write_transaction_record.error = error
 
 
 def _empty_active_runtime_audit() -> ActiveRuntimePluginSourceAudit:
@@ -274,6 +436,14 @@ def _empty_active_runtime_audit() -> ActiveRuntimePluginSourceAudit:
     )
 
 
+def _fake_empty_active_runtime_audit(
+    **kwargs: object,
+) -> ActiveRuntimePluginSourceAudit:
+    """返回空审计结果，并为 monkeypatch 提供完整类型签名。"""
+    _ = kwargs
+    return _empty_active_runtime_audit()
+
+
 @pytest.mark.asyncio
 async def test_native_write_back_helper_applies_plan(
     tmp_path: Path,
@@ -281,7 +451,6 @@ async def test_native_write_back_helper_applies_plan(
 ) -> None:
     """普通写回快路径必须应用 Rust 计划并执行事务替换。"""
     session = _NativePlanSessionStub(tmp_path)
-    written_files: list[tuple[Path, str]] = []
     statuses: list[str] = []
 
     def fake_build_native_write_back_plan(**kwargs: object) -> NativeWriteBackPlan:
@@ -295,7 +464,7 @@ async def test_native_write_back_helper_applies_plan(
                 NativePlannedFile(
                     target_path=session.content_root / "data" / "System.json",
                     relative_path="data/System.json",
-                    content="{\"gameTitle\":\"测试\"}\n",
+                    content='{"gameTitle":"测试"}\n',
                 )
             ],
             plugin_source_runtime_write_maps=[],
@@ -314,21 +483,11 @@ async def test_native_write_back_helper_applies_plan(
             timings_ms={"total": 1, "active_runtime_audit": 12345},
         )
 
-    def fake_write_planned_text_files(
-        *,
-        files: list[tuple[Path, str | None, Path | None]],
-        rollback_dir_parent: Path,
-    ) -> None:
-        """记录事务写入计划。"""
-        assert rollback_dir_parent == session.content_root
-        for target_path, content, source_path in files:
-            assert content is not None
-            assert source_path is None
-            written_files.append((target_path, content))
-
     async def fake_load_active_runtime_game_data(game_path: Path) -> GameData:
-        """模拟写入后重新加载当前运行视图。"""
-        assert game_path == session.game_path
+        """模拟加载尚未替换到真实目录的暂存运行视图。"""
+        assert game_path != session.game_path
+        assert (game_path / "data" / "System.json").read_text(encoding="utf-8") == '{"gameTitle":"测试"}\n'
+        assert not (session.content_root / "data" / "System.json").exists()
         return cast(GameData, cast(object, SimpleNamespace()))
 
     def fake_audit_active_runtime_plugin_source(
@@ -346,9 +505,10 @@ async def test_native_write_back_helper_applies_plan(
         return _empty_active_runtime_audit()
 
     monkeypatch.setattr("app.application.handler.build_native_write_back_plan", fake_build_native_write_back_plan)
-    monkeypatch.setattr("app.application.handler.write_planned_text_file_sources", fake_write_planned_text_files)
     monkeypatch.setattr("app.application.handler.load_active_runtime_game_data", fake_load_active_runtime_game_data)
-    monkeypatch.setattr("app.application.handler.audit_active_runtime_plugin_source", fake_audit_active_runtime_plugin_source)
+    monkeypatch.setattr(
+        "app.application.handler.audit_active_runtime_plugin_source", fake_audit_active_runtime_plugin_source
+    )
 
     handler = TranslationHandler(GameRegistry(tmp_path / "db"), LLMHandler())
     try:
@@ -376,27 +536,236 @@ async def test_native_write_back_helper_applies_plan(
         await handler.close()
 
     assert summary.data_item_count == 1
-    assert written_files == [(session.content_root / "data" / "System.json", "{\"gameTitle\":\"测试\"}\n")]
+    assert (session.content_root / "data" / "System.json").read_text(encoding="utf-8") == '{"gameTitle":"测试"}\n'
     assert summary.post_write_audit_ms < 12345
     assert statuses == [
         "准备 Rust 写回计划输入",
         "生成 Rust 写回计划",
-        "替换游戏运行文件",
-        "保存写入诊断映射",
-        "审计写入后的当前运行文件",
+        "暂存并校验游戏运行文件",
+        "审计暂存运行视图",
+        "原子替换游戏运行文件",
+        "校验已替换文件哈希",
+        "提交写事务诊断状态",
     ]
     assert session.runtime_map_replace_calls == 1
     assert session.runtime_map_replace_count == 0
+    assert session.write_transaction_record is not None
+    assert session.write_transaction_record.state == "finalized"
+    assert not list(session.content_root.rglob("*.att-mz-write-*"))
 
 
 @pytest.mark.asyncio
-async def test_native_write_back_helper_saves_runtime_map_before_post_write_audit(
+async def test_native_write_back_helper_includes_font_and_css_in_same_transaction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """写入后审计失败前先保存诊断映射，方便随后精确反推。"""
+    """字体文件、CSS 和首次原件留档必须与运行文件共用同一事务。"""
+    session = _NativePlanSessionStub(tmp_path)
+    font_directory = session.content_root / "fonts"
+    font_directory.mkdir()
+    css_path = font_directory / "gamefont.css"
+    original_css = "@font-face { font-family: GameFont; src: url('OldFont.woff'); }\n"
+    _ = css_path.write_text(original_css, encoding="utf-8")
+    replacement_font_path = tmp_path / "Replacement.ttf"
+    _ = replacement_font_path.write_bytes(b"replacement font")
+
+    def fake_build_setting_payload(
+        _handler: TranslationHandler,
+        **kwargs: object,
+    ) -> tuple[dict[str, object], Path, list[str]]:
+        """固定返回已确认的字体覆盖输入。"""
+        _ = kwargs
+        return {}, replacement_font_path, ["OldFont.woff"]
+
+    def fake_build_native_write_back_plan(**kwargs: object) -> NativeWriteBackPlan:
+        """让本测试只观察 Python 负责的字体文件事务。"""
+        _ = kwargs
+        return NativeWriteBackPlan(
+            files=[],
+            plugin_source_runtime_write_maps=[],
+            font_replacement_records=[],
+            summary=NativeWriteBackSummary(
+                data_item_count=0,
+                plugin_item_count=0,
+                terminology_written_count=0,
+                target_font_name="Replacement.ttf",
+                source_font_count=1,
+                replaced_font_reference_count=0,
+                font_copied=True,
+                planned_file_count=0,
+                skipped_file_count=0,
+            ),
+            timings_ms={"total": 1},
+        )
+
+    async def fake_load_active_runtime_game_data(game_path: Path) -> GameData:
+        assert game_path != session.game_path
+        assert (game_path / "fonts" / "Replacement.ttf").read_bytes() == b"replacement font"
+        assert (game_path / "fonts" / "gamefont_origin.css").read_text(encoding="utf-8") == original_css
+        assert "Replacement.ttf" in (game_path / "fonts" / "gamefont.css").read_text(encoding="utf-8")
+        assert not (font_directory / "Replacement.ttf").exists()
+        assert not (font_directory / "gamefont_origin.css").exists()
+        assert css_path.read_text(encoding="utf-8") == original_css
+        return cast(GameData, cast(object, SimpleNamespace()))
+
+    monkeypatch.setattr(
+        TranslationHandler,
+        "_build_native_write_back_setting_payload",
+        fake_build_setting_payload,
+    )
+    monkeypatch.setattr(
+        "app.application.handler.build_native_write_back_plan",
+        fake_build_native_write_back_plan,
+    )
+    monkeypatch.setattr(
+        "app.application.handler.load_active_runtime_game_data",
+        fake_load_active_runtime_game_data,
+    )
+    monkeypatch.setattr(
+        "app.application.handler.audit_active_runtime_plugin_source",
+        _fake_empty_active_runtime_audit,
+    )
+
+    handler = TranslationHandler(GameRegistry(tmp_path / "db"), LLMHandler())
+    try:
+        summary = await handler.write_runtime_files_with_native_plan(
+            session=cast(TargetGameSession, cast(object, session)),
+            game_title="テストゲーム",
+            callbacks=(lambda _current, _total: None, lambda _count: None),
+            setting=cast(
+                Setting,
+                cast(
+                    object,
+                    SimpleNamespace(
+                        text_rules=TextRulesSetting(),
+                        write_back=WriteBackSetting(),
+                    ),
+                ),
+            ),
+            text_rules=TextRules.from_setting(TextRulesSetting()),
+            mode="write_back",
+            writable_location_paths=[],
+            confirm_font_overwrite=True,
+            success_phase="游戏文本回写完成",
+        )
+    finally:
+        await handler.close()
+
+    assert (font_directory / "Replacement.ttf").read_bytes() == b"replacement font"
+    assert (font_directory / "gamefont_origin.css").read_text(encoding="utf-8") == original_css
+    assert "Replacement.ttf" in css_path.read_text(encoding="utf-8")
+    assert summary.planned_file_count == 3
+    assert summary.replaced_font_reference_count == 1
+    assert session.font_record_replace_count == 1
+    assert session.write_transaction_record is not None
+    assert session.write_transaction_record.state == "finalized"
+
+
+@pytest.mark.asyncio
+async def test_native_write_back_helper_commits_diagnostics_when_files_are_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没有文件差异时，运行映射与事务完成状态仍须原子提交。"""
+    session = _NativePlanSessionStub(tmp_path)
+    statuses: list[str] = []
+
+    def fake_build_native_write_back_plan(**kwargs: object) -> NativeWriteBackPlan:
+        _ = kwargs
+        return NativeWriteBackPlan(
+            files=[],
+            plugin_source_runtime_write_maps=[],
+            font_replacement_records=[],
+            summary=NativeWriteBackSummary(
+                data_item_count=0,
+                plugin_item_count=0,
+                terminology_written_count=0,
+                target_font_name=None,
+                source_font_count=0,
+                replaced_font_reference_count=0,
+                font_copied=False,
+                planned_file_count=0,
+                skipped_file_count=1,
+            ),
+            timings_ms={"total": 1},
+        )
+
+    async def fake_load_active_runtime_game_data(game_path: Path) -> GameData:
+        assert game_path == session.game_path
+        return cast(GameData, cast(object, SimpleNamespace()))
+
+    monkeypatch.setattr(
+        "app.application.handler.build_native_write_back_plan",
+        fake_build_native_write_back_plan,
+    )
+    monkeypatch.setattr(
+        "app.application.handler.load_active_runtime_game_data",
+        fake_load_active_runtime_game_data,
+    )
+    monkeypatch.setattr(
+        "app.application.handler.audit_active_runtime_plugin_source",
+        _fake_empty_active_runtime_audit,
+    )
+
+    handler = TranslationHandler(GameRegistry(tmp_path / "db"), LLMHandler())
+    try:
+        summary = await handler.write_runtime_files_with_native_plan(
+            session=cast(TargetGameSession, cast(object, session)),
+            game_title="テストゲーム",
+            callbacks=(lambda _current, _total: None, lambda _count: None, statuses.append),
+            setting=cast(
+                Setting,
+                cast(
+                    object,
+                    SimpleNamespace(
+                        text_rules=TextRulesSetting(),
+                        write_back=WriteBackSetting(),
+                    ),
+                ),
+            ),
+            text_rules=TextRules.from_setting(TextRulesSetting()),
+            mode="write_back",
+            writable_location_paths=[],
+            confirm_font_overwrite=False,
+            success_phase="游戏文本回写完成",
+        )
+    finally:
+        await handler.close()
+
+    assert summary.planned_file_count == 0
+    assert session.runtime_map_replace_calls == 1
+    assert session.write_transaction_record is not None
+    assert session.write_transaction_record.state == "finalized"
+    assert statuses == [
+        "准备 Rust 写回计划输入",
+        "生成 Rust 写回计划",
+        "审计写入后的当前运行文件",
+        "提交写事务诊断状态",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_native_write_back_helper_rolls_back_before_saving_runtime_map_on_audit_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """写入后审计失败时连同字体副作用回滚，且不提交新诊断记录。"""
     session = _NativePlanSessionStub(tmp_path)
     events: list[str] = []
+    font_directory = session.content_root / "fonts"
+    font_directory.mkdir()
+    css_path = font_directory / "gamefont.css"
+    original_css = "@font-face { font-family: GameFont; src: url('OldFont.woff'); }\n"
+    _ = css_path.write_text(original_css, encoding="utf-8")
+    replacement_font_path = tmp_path / "Replacement.ttf"
+    _ = replacement_font_path.write_bytes(b"replacement font")
+
+    def fake_build_setting_payload(
+        _handler: TranslationHandler,
+        **kwargs: object,
+    ) -> tuple[dict[str, object], Path, list[str]]:
+        _ = kwargs
+        return {}, replacement_font_path, ["OldFont.woff"]
 
     def fake_build_native_write_back_plan(**kwargs: object) -> NativeWriteBackPlan:
         """返回会触发写入后审计失败的最小计划。"""
@@ -428,21 +797,14 @@ async def test_native_write_back_helper_saves_runtime_map_before_post_write_audi
             timings_ms={"total": 1, "active_runtime_audit": 999},
         )
 
-    def fake_write_planned_text_files(
-        *,
-        files: list[tuple[Path, str | None, Path | None]],
-        rollback_dir_parent: Path,
-    ) -> None:
-        """记录文件替换已经发生。"""
-        for _target_path, content, source_path in files:
-            assert content is not None
-            assert source_path is None
-        assert rollback_dir_parent == session.content_root
-        events.append("write")
-
     async def fake_load_active_runtime_game_data(game_path: Path) -> GameData:
-        """记录写入后重新加载当前运行视图。"""
-        assert game_path == session.game_path
+        """记录审计暂存运行视图，并确认真实目录尚未变更。"""
+        assert game_path != session.game_path
+        assert (game_path / "js" / "plugins" / "Broken.js").read_text(encoding="utf-8") == "if (\n"
+        assert not (session.content_root / "js" / "plugins" / "Broken.js").exists()
+        assert not (font_directory / "Replacement.ttf").exists()
+        assert not (font_directory / "gamefont_origin.css").exists()
+        assert css_path.read_text(encoding="utf-8") == original_css
         events.append("load")
         return cast(GameData, cast(object, SimpleNamespace()))
 
@@ -477,9 +839,15 @@ async def test_native_write_back_helper_saves_runtime_map_before_post_write_audi
         )
 
     monkeypatch.setattr("app.application.handler.build_native_write_back_plan", fake_build_native_write_back_plan)
-    monkeypatch.setattr("app.application.handler.write_planned_text_file_sources", fake_write_planned_text_files)
+    monkeypatch.setattr(
+        TranslationHandler,
+        "_build_native_write_back_setting_payload",
+        fake_build_setting_payload,
+    )
     monkeypatch.setattr("app.application.handler.load_active_runtime_game_data", fake_load_active_runtime_game_data)
-    monkeypatch.setattr("app.application.handler.audit_active_runtime_plugin_source", fake_audit_active_runtime_plugin_source)
+    monkeypatch.setattr(
+        "app.application.handler.audit_active_runtime_plugin_source", fake_audit_active_runtime_plugin_source
+    )
 
     handler = TranslationHandler(GameRegistry(tmp_path / "db"), LLMHandler())
     try:
@@ -501,15 +869,22 @@ async def test_native_write_back_helper_saves_runtime_map_before_post_write_audi
                 text_rules=TextRules.from_setting(TextRulesSetting()),
                 mode="write_back",
                 writable_location_paths=[],
-                confirm_font_overwrite=False,
+                confirm_font_overwrite=True,
                 success_phase="游戏文本回写完成",
             )
     finally:
         await handler.close()
 
-    assert events == ["write", "load", "audit"]
-    assert session.runtime_map_replace_calls == 1
+    assert events == ["load", "audit"]
+    assert session.runtime_map_replace_calls == 0
     assert session.runtime_map_replace_count == 0
+    assert session.write_transaction_record is not None
+    assert session.write_transaction_record.state == "rolled_back"
+    assert not (session.content_root / "js" / "plugins" / "Broken.js").exists()
+    assert not (font_directory / "Replacement.ttf").exists()
+    assert not (font_directory / "gamefont_origin.css").exists()
+    assert css_path.read_text(encoding="utf-8") == original_css
+    assert session.font_record_replace_count == 0
 
 
 @pytest.mark.asyncio
@@ -523,6 +898,26 @@ async def test_loader_only_keeps_standard_rmmz_data_files(minimal_game_dir: Path
     assert "Map002.json" in game_data.map_data
     assert game_data.plugins_js[0]["name"] == "TestPlugin"
     assert game_data.plugins_js[1]["name"] == "ComplexPlugin"
+
+
+@pytest.mark.asyncio
+async def test_loader_and_font_reader_accept_json5_plugins_array(minimal_game_dir: Path) -> None:
+    """加载与字体恢复共用 Rust/json5 解析能力，支持标准 JS 对象写法。"""
+    plugins_path = minimal_game_dir / "js" / "plugins.js"
+    _ = plugins_path.write_text(
+        """var $plugins = [
+  {name: 'TestPlugin', status: true, description: '説明', parameters: {Message: '本文',},},
+];
+""",
+        encoding="utf-8",
+    )
+
+    game_data = await load_game_data(minimal_game_dir)
+    font_plugins = read_plugins_js_file(plugins_path)
+
+    assert game_data.plugins_js == font_plugins
+    assert game_data.plugins_js[0]["name"] == "TestPlugin"
+    assert game_data.plugins_js[0]["parameters"] == {"Message": "本文"}
 
 
 @pytest.mark.asyncio
@@ -662,11 +1057,7 @@ async def test_mv_data_extraction_reads_role_from_first_401(
         get_default_text_rules(),
         mv_virtual_namebox_rule_records=mv_namebox_rules,
     ).extract_all_text()
-    items_by_path = {
-        item.location_path: item
-        for data in extracted.values()
-        for item in data.translation_items
-    }
+    items_by_path = {item.location_path: item for data in extracted.values() for item in data.translation_items}
 
     assert items_by_path["CommonEvents.json/1/0"].role == "旁白"
     assert items_by_path["CommonEvents.json/2/0"].role == "案内人"
@@ -684,7 +1075,9 @@ async def test_mv_data_extraction_reads_role_from_first_401(
     assert items_by_path["CommonEvents.json/7/0"].role == "案内人"
     assert items_by_path["CommonEvents.json/7/0"].original_lines == ["第五参数を無視します」"]
     assert items_by_path["CommonEvents.json/8/0"].role == "旁白"
-    assert items_by_path["CommonEvents.json/8/0"].original_lines == ["まだやるかい？掛け金はそのままだぜ？（掛け金\\V[48])"]
+    assert items_by_path["CommonEvents.json/8/0"].original_lines == [
+        "まだやるかい？掛け金はそのままだぜ？（掛け金\\V[48])"
+    ]
     assert items_by_path["CommonEvents.json/9/0"].role == "案内人"
     assert items_by_path["CommonEvents.json/9/0"].original_lines == ["独立行の本文です"]
     assert items_by_path["CommonEvents.json/9/0"].source_line_paths == ["CommonEvents.json/9/2"]
@@ -758,11 +1151,7 @@ async def test_english_visible_401_short_fragment_is_extracted(
     )
     game_data = await load_game_data(minimal_game_dir)
     extracted = DataTextExtraction(game_data, text_rules).extract_all_text()
-    items_by_path = {
-        item.location_path: item
-        for data in extracted.values()
-        for item in data.translation_items
-    }
+    items_by_path = {item.location_path: item for data in extracted.values() for item in data.translation_items}
 
     assert items_by_path["CommonEvents.json/3/0"].role == "Adriel"
     assert items_by_path["CommonEvents.json/3/0"].original_lines == ["But-"]
@@ -797,11 +1186,7 @@ async def test_english_visible_401_control_only_letters_do_not_extract_chinese_t
     )
     game_data = await load_game_data(minimal_game_dir)
     extracted = DataTextExtraction(game_data, text_rules).extract_all_text()
-    items_by_path = {
-        item.location_path: item
-        for data in extracted.values()
-        for item in data.translation_items
-    }
+    items_by_path = {item.location_path: item for data in extracted.values() for item in data.translation_items}
 
     assert "CommonEvents.json/3/0" not in items_by_path
 
@@ -824,15 +1209,9 @@ async def test_english_description_with_this_is_extracted(minimal_english_game_d
     )
     game_data = await load_game_data(minimal_english_game_dir)
     extracted = DataTextExtraction(game_data, text_rules).extract_all_text()
-    items_by_path = {
-        item.location_path: item
-        for data in extracted.values()
-        for item in data.translation_items
-    }
+    items_by_path = {item.location_path: item for data in extracted.values() for item in data.translation_items}
 
-    assert items_by_path["Items.json/1/description"].original_lines == [
-        "With this rope, you can cross the old bridge."
-    ]
+    assert items_by_path["Items.json/1/description"].original_lines == ["With this rope, you can cross the old bridge."]
 
 
 @pytest.mark.asyncio
@@ -859,9 +1238,7 @@ async def test_write_back_keeps_english_visible_401_short_fragment(
     app_home = tmp_path / "app-home"
     app_home.mkdir()
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "text_translation_ja_to_zh_system.md"
-    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(
-        encoding="utf-8"
-    )
+    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(encoding="utf-8")
     setting_text = setting_text.replace(
         'system_prompt_file = "prompts/text_translation_ja_to_zh_system.md"',
         f'system_prompt_file = "{prompt_path.as_posix()}"',
@@ -912,6 +1289,17 @@ async def test_write_back_keeps_english_visible_401_short_fragment(
             ),
             structured_placeholder_rules=(),
         )
+        plugin_source_scan = derive_plugin_source_scan(
+            index=build_plugin_source_raw_index(game_data=game_data),
+            text_rules=text_rules,
+        )
+        await session.replace_plugin_source_assessment(
+            source_hash=plugin_source_rule_scope_hash(scan=plugin_source_scan),
+            text_rules_hash=plugin_source_text_rules_hash(text_rules),
+            high_risk=plugin_source_scan.risk.high_risk,
+            candidate_count=len(plugin_source_scan.candidates),
+            summary=plugin_source_scan.risk_report_json(),
+        )
         await session.replace_rule_review_state(
             rule_domain=NOTE_TAG_TEXT_RULE_DOMAIN,
             scope_hash=note_tag_rule_scope_hash_for_text_rules(
@@ -920,22 +1308,27 @@ async def test_write_back_keeps_english_visible_401_short_fragment(
             ),
             reviewed_empty=True,
         )
-        scope = await TextScopeService().build(
+        analysis_context = await build_game_analysis_context(
             session=session,
             game_data=game_data,
             text_rules=text_rules,
         )
+        scope = analysis_context.scope
         await session.replace_rule_review_state(
             rule_domain=STRUCTURED_PLACEHOLDER_RULE_DOMAIN,
-            scope_hash=structured_placeholder_scope_hash(
-                translation_data_map=scope.translation_data_map,
-                structured_rules=(),
+            scope_hash=structured_placeholder_scope_hash_from_analysis(
+                analyze_structured_placeholder_candidates(scope.translation_data_map, text_rules)
             ),
             reviewed_empty=True,
         )
         active_items = scope.active_items()
-        await session.write_translation_items(
-            [
+        await _write_current_translation_items(
+            session=session,
+            game_data=game_data,
+            setting=setting,
+            text_rules=text_rules,
+            scope=scope,
+            items=[
                 TranslationItem(
                     location_path=item.location_path,
                     item_type=item.item_type,
@@ -944,13 +1337,10 @@ async def test_write_back_keeps_english_visible_401_short_fragment(
                     source_line_paths=[path for path in item.source_line_paths],
                     translation_lines=["但是——"]
                     if item.location_path == "CommonEvents.json/3/0"
-                    else [
-                        _translated_test_line_preserving_controls(line, text_rules)
-                        for line in item.original_lines
-                    ],
+                    else [_translated_test_line_preserving_controls(line, text_rules) for line in item.original_lines],
                 )
                 for item in active_items
-            ]
+            ],
         )
 
     handler = TranslationHandler(registry, LLMHandler())
@@ -985,9 +1375,7 @@ async def test_direct_write_back_rejects_latest_quality_errors(
     app_home = tmp_path / "app-home"
     app_home.mkdir()
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "text_translation_ja_to_zh_system.md"
-    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(
-        encoding="utf-8"
-    )
+    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(encoding="utf-8")
     setting_text = setting_text.replace(
         'system_prompt_file = "prompts/text_translation_ja_to_zh_system.md"',
         f'system_prompt_file = "{prompt_path.as_posix()}"',
@@ -997,7 +1385,7 @@ async def test_direct_write_back_rejects_latest_quality_errors(
 
     registry = GameRegistry(tmp_path / "db")
     _ = await registry.register_game(minimal_game_dir, source_language="ja")
-    async with await registry.open_game("テストゲーム") as session:
+    async with await registry.open_game_with_mutation_lease("テストゲーム") as session:
         game_data = await load_game_data(minimal_game_dir)
         placeholder_record = PlaceholderRuleRecord(
             pattern_text=r"(?i)\\F\d*\[[^\]\r\n]+\]",
@@ -1038,6 +1426,17 @@ async def test_direct_write_back_rejects_latest_quality_errors(
             ),
             structured_placeholder_rules=(),
         )
+        plugin_source_scan = derive_plugin_source_scan(
+            index=build_plugin_source_raw_index(game_data=game_data),
+            text_rules=text_rules,
+        )
+        await session.replace_plugin_source_assessment(
+            source_hash=plugin_source_rule_scope_hash(scan=plugin_source_scan),
+            text_rules_hash=plugin_source_text_rules_hash(text_rules),
+            high_risk=plugin_source_scan.risk.high_risk,
+            candidate_count=len(plugin_source_scan.candidates),
+            summary=plugin_source_scan.risk_report_json(),
+        )
         await session.replace_rule_review_state(
             rule_domain=NOTE_TAG_TEXT_RULE_DOMAIN,
             scope_hash=note_tag_rule_scope_hash_for_text_rules(
@@ -1046,16 +1445,16 @@ async def test_direct_write_back_rejects_latest_quality_errors(
             ),
             reviewed_empty=True,
         )
-        scope = await TextScopeService().build(
+        analysis_context = await build_game_analysis_context(
             session=session,
             game_data=game_data,
             text_rules=text_rules,
         )
+        scope = analysis_context.scope
         await session.replace_rule_review_state(
             rule_domain=STRUCTURED_PLACEHOLDER_RULE_DOMAIN,
-            scope_hash=structured_placeholder_scope_hash(
-                translation_data_map=scope.translation_data_map,
-                structured_rules=(),
+            scope_hash=structured_placeholder_scope_hash_from_analysis(
+                analyze_structured_placeholder_candidates(scope.translation_data_map, text_rules)
             ),
             reviewed_empty=True,
         )
@@ -1105,9 +1504,7 @@ async def test_direct_write_back_rejects_missing_workflow_rules(
     app_home = tmp_path / "app-home"
     app_home.mkdir()
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "text_translation_ja_to_zh_system.md"
-    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(
-        encoding="utf-8"
-    )
+    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(encoding="utf-8")
     setting_text = setting_text.replace(
         'system_prompt_file = "prompts/text_translation_ja_to_zh_system.md"',
         f'system_prompt_file = "{prompt_path.as_posix()}"',
@@ -1138,9 +1535,7 @@ async def test_direct_rebuild_active_runtime_rejects_missing_workflow_rules(
     app_home = tmp_path / "app-home"
     app_home.mkdir()
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "text_translation_ja_to_zh_system.md"
-    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(
-        encoding="utf-8"
-    )
+    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(encoding="utf-8")
     setting_text = setting_text.replace(
         'system_prompt_file = "prompts/text_translation_ja_to_zh_system.md"',
         f'system_prompt_file = "{prompt_path.as_posix()}"',
@@ -1171,9 +1566,7 @@ async def test_direct_rebuild_active_runtime_uses_real_native_success_path(
     app_home = tmp_path / "app-home"
     app_home.mkdir()
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "text_translation_ja_to_zh_system.md"
-    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(
-        encoding="utf-8"
-    )
+    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(encoding="utf-8")
     setting_text = setting_text.replace(
         'system_prompt_file = "prompts/text_translation_ja_to_zh_system.md"',
         f'system_prompt_file = "{prompt_path.as_posix()}"',
@@ -1224,6 +1617,17 @@ async def test_direct_rebuild_active_runtime_uses_real_native_success_path(
             ),
             structured_placeholder_rules=(),
         )
+        plugin_source_scan = derive_plugin_source_scan(
+            index=build_plugin_source_raw_index(game_data=game_data),
+            text_rules=text_rules,
+        )
+        await session.replace_plugin_source_assessment(
+            source_hash=plugin_source_rule_scope_hash(scan=plugin_source_scan),
+            text_rules_hash=plugin_source_text_rules_hash(text_rules),
+            high_risk=plugin_source_scan.risk.high_risk,
+            candidate_count=len(plugin_source_scan.candidates),
+            summary=plugin_source_scan.risk_report_json(),
+        )
         await session.replace_rule_review_state(
             rule_domain=NOTE_TAG_TEXT_RULE_DOMAIN,
             scope_hash=note_tag_rule_scope_hash_for_text_rules(
@@ -1232,21 +1636,26 @@ async def test_direct_rebuild_active_runtime_uses_real_native_success_path(
             ),
             reviewed_empty=True,
         )
-        scope = await TextScopeService().build(
+        analysis_context = await build_game_analysis_context(
             session=session,
             game_data=game_data,
             text_rules=text_rules,
         )
+        scope = analysis_context.scope
         await session.replace_rule_review_state(
             rule_domain=STRUCTURED_PLACEHOLDER_RULE_DOMAIN,
-            scope_hash=structured_placeholder_scope_hash(
-                translation_data_map=scope.translation_data_map,
-                structured_rules=(),
+            scope_hash=structured_placeholder_scope_hash_from_analysis(
+                analyze_structured_placeholder_candidates(scope.translation_data_map, text_rules)
             ),
             reviewed_empty=True,
         )
-        await session.write_translation_items(
-            [
+        await _write_current_translation_items(
+            session=session,
+            game_data=game_data,
+            setting=setting,
+            text_rules=text_rules,
+            scope=scope,
+            items=[
                 TranslationItem(
                     location_path=item.location_path,
                     item_type=item.item_type,
@@ -1254,12 +1663,11 @@ async def test_direct_rebuild_active_runtime_uses_real_native_success_path(
                     original_lines=[line for line in item.original_lines],
                     source_line_paths=[path for path in item.source_line_paths],
                     translation_lines=[
-                        _translated_test_line_preserving_controls(line, text_rules)
-                        for line in item.original_lines
+                        _translated_test_line_preserving_controls(line, text_rules) for line in item.original_lines
                     ],
                 )
                 for item in scope.active_items()
-            ]
+            ],
         )
 
     _rewrite_json(
@@ -1301,9 +1709,7 @@ async def test_direct_write_back_rejects_missing_source_snapshot_manifest(
     app_home = tmp_path / "app-home"
     app_home.mkdir()
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "text_translation_ja_to_zh_system.md"
-    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(
-        encoding="utf-8"
-    )
+    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(encoding="utf-8")
     setting_text = setting_text.replace(
         'system_prompt_file = "prompts/text_translation_ja_to_zh_system.md"',
         f'system_prompt_file = "{prompt_path.as_posix()}"',
@@ -1338,9 +1744,7 @@ async def test_write_terminology_allows_pending_body_translation_run(
     app_home = tmp_path / "app-home"
     app_home.mkdir()
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "text_translation_ja_to_zh_system.md"
-    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(
-        encoding="utf-8"
-    )
+    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(encoding="utf-8")
     setting_text = setting_text.replace(
         'system_prompt_file = "prompts/text_translation_ja_to_zh_system.md"',
         f'system_prompt_file = "{prompt_path.as_posix()}"',
@@ -1350,7 +1754,7 @@ async def test_write_terminology_allows_pending_body_translation_run(
 
     registry = GameRegistry(tmp_path / "db")
     _ = await registry.register_game(minimal_game_dir, source_language="ja")
-    async with await registry.open_game("テストゲーム") as session:
+    async with await registry.open_game_with_mutation_lease("テストゲーム") as session:
         _ = await _prepare_write_gate_session(
             session=session,
             game_dir=minimal_game_dir,
@@ -1394,9 +1798,7 @@ async def test_direct_write_back_rejects_active_runtime_read_error_before_writin
     app_home = tmp_path / "app-home"
     app_home.mkdir()
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "text_translation_ja_to_zh_system.md"
-    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(
-        encoding="utf-8"
-    )
+    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(encoding="utf-8")
     setting_text = setting_text.replace(
         'system_prompt_file = "prompts/text_translation_ja_to_zh_system.md"',
         f'system_prompt_file = "{prompt_path.as_posix()}"',
@@ -1407,7 +1809,9 @@ async def test_direct_write_back_rejects_active_runtime_read_error_before_writin
     plugins_path = minimal_game_dir / "js" / "plugins.js"
     plugins_text = plugins_path.read_text(encoding="utf-8")
     plugins = ensure_json_array(
-        coerce_json_value(cast(object, json.loads(plugins_text[plugins_text.index("["):plugins_text.rindex("]") + 1]))),
+        coerce_json_value(
+            cast(object, json.loads(plugins_text[plugins_text.index("[") : plugins_text.rindex("]") + 1]))
+        ),
         "plugins",
     )
     plugins.append({"name": "BrokenEncoding", "status": True, "description": "", "parameters": {}})
@@ -1477,21 +1881,26 @@ async def test_direct_write_back_rejects_active_runtime_read_error_before_writin
             ),
             reviewed_empty=True,
         )
-        scope = await TextScopeService().build(
+        analysis_context = await build_game_analysis_context(
             session=session,
             game_data=game_data,
             text_rules=text_rules,
         )
+        scope = analysis_context.scope
         await session.replace_rule_review_state(
             rule_domain=STRUCTURED_PLACEHOLDER_RULE_DOMAIN,
-            scope_hash=structured_placeholder_scope_hash(
-                translation_data_map=scope.translation_data_map,
-                structured_rules=(),
+            scope_hash=structured_placeholder_scope_hash_from_analysis(
+                analyze_structured_placeholder_candidates(scope.translation_data_map, text_rules)
             ),
             reviewed_empty=True,
         )
-        await session.write_translation_items(
-            [
+        await _write_current_translation_items(
+            session=session,
+            game_data=game_data,
+            setting=setting,
+            text_rules=text_rules,
+            scope=scope,
+            items=[
                 TranslationItem(
                     location_path=item.location_path,
                     item_type=item.item_type,
@@ -1500,13 +1909,10 @@ async def test_direct_write_back_rejects_active_runtime_read_error_before_writin
                     source_line_paths=[path for path in item.source_line_paths],
                     translation_lines=["但是——"]
                     if item.location_path == "CommonEvents.json/3/0"
-                    else [
-                        _translated_test_line_preserving_controls(line, text_rules)
-                        for line in item.original_lines
-                    ],
+                    else [_translated_test_line_preserving_controls(line, text_rules) for line in item.original_lines],
                 )
                 for item in scope.active_items()
-            ]
+            ],
         )
 
     handler = TranslationHandler(registry, LLMHandler())
@@ -1532,9 +1938,7 @@ async def test_direct_write_back_ignores_excluded_plugin_source_text_issues_duri
     app_home = tmp_path / "app-home"
     app_home.mkdir()
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "text_translation_ja_to_zh_system.md"
-    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(
-        encoding="utf-8"
-    )
+    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(encoding="utf-8")
     setting_text = setting_text.replace(
         'system_prompt_file = "prompts/text_translation_ja_to_zh_system.md"',
         f'system_prompt_file = "{prompt_path.as_posix()}"',
@@ -1545,7 +1949,9 @@ async def test_direct_write_back_ignores_excluded_plugin_source_text_issues_duri
     plugins_path = minimal_game_dir / "js" / "plugins.js"
     plugins_text = plugins_path.read_text(encoding="utf-8")
     plugins = ensure_json_array(
-        coerce_json_value(cast(object, json.loads(plugins_text[plugins_text.index("["):plugins_text.rindex("]") + 1]))),
+        coerce_json_value(
+            cast(object, json.loads(plugins_text[plugins_text.index("[") : plugins_text.rindex("]") + 1]))
+        ),
         "plugins",
     )
     plugins.append({"name": "HardcodedText", "status": True, "description": "", "parameters": {}})
@@ -1605,13 +2011,23 @@ async def test_direct_write_back_ignores_excluded_plugin_source_text_issues_duri
             ),
             structured_placeholder_rules=(),
         )
+        plugin_source_scan = derive_plugin_source_scan(
+            index=build_plugin_source_raw_index(game_data=game_data),
+            text_rules=text_rules,
+        )
+        await session.replace_plugin_source_assessment(
+            source_hash=plugin_source_rule_scope_hash(scan=plugin_source_scan),
+            text_rules_hash=plugin_source_text_rules_hash(text_rules),
+            high_risk=plugin_source_scan.risk.high_risk,
+            candidate_count=len(plugin_source_scan.candidates),
+            summary=plugin_source_scan.risk_report_json(),
+        )
         candidate = next(
             candidate
-            for candidate in build_plugin_source_scan(game_data=game_data, text_rules=text_rules).candidates
+            for candidate in plugin_source_scan.candidates
             if candidate.file_name == "HardcodedText.js" and candidate.text == "カテゴリ"
         )
         plugin_source_records = build_plugin_source_rule_records_from_import(
-            game_data=game_data,
             import_file=parse_plugin_source_rule_import_text(
                 json.dumps(
                     [
@@ -1624,7 +2040,7 @@ async def test_direct_write_back_ignores_excluded_plugin_source_text_issues_duri
                     ensure_ascii=False,
                 )
             ),
-            text_rules=text_rules,
+            scan=plugin_source_scan,
         )
         await session.replace_plugin_source_text_rules(plugin_source_records)
         await session.replace_rule_review_state(
@@ -1635,21 +2051,26 @@ async def test_direct_write_back_ignores_excluded_plugin_source_text_issues_duri
             ),
             reviewed_empty=True,
         )
-        scope = await TextScopeService().build(
+        analysis_context = await build_game_analysis_context(
             session=session,
             game_data=game_data,
             text_rules=text_rules,
         )
+        scope = analysis_context.scope
         await session.replace_rule_review_state(
             rule_domain=STRUCTURED_PLACEHOLDER_RULE_DOMAIN,
-            scope_hash=structured_placeholder_scope_hash(
-                translation_data_map=scope.translation_data_map,
-                structured_rules=(),
+            scope_hash=structured_placeholder_scope_hash_from_analysis(
+                analyze_structured_placeholder_candidates(scope.translation_data_map, text_rules)
             ),
             reviewed_empty=True,
         )
-        await session.write_translation_items(
-            [
+        await _write_current_translation_items(
+            session=session,
+            game_data=game_data,
+            setting=setting,
+            text_rules=text_rules,
+            scope=scope,
+            items=[
                 TranslationItem(
                     location_path=item.location_path,
                     item_type=item.item_type,
@@ -1657,12 +2078,11 @@ async def test_direct_write_back_ignores_excluded_plugin_source_text_issues_duri
                     original_lines=[line for line in item.original_lines],
                     source_line_paths=[path for path in item.source_line_paths],
                     translation_lines=[
-                        _translated_test_line_preserving_controls(line, text_rules)
-                        for line in item.original_lines
+                        _translated_test_line_preserving_controls(line, text_rules) for line in item.original_lines
                     ],
                 )
                 for item in scope.active_items()
-            ]
+            ],
         )
 
     def forbidden_python_native_check(*args: object, **kwargs: object) -> NoReturn:
@@ -1671,7 +2091,9 @@ async def test_direct_write_back_ignores_excluded_plugin_source_text_issues_duri
         raise AssertionError("写入路径不应重复执行 Python 侧原生检查")
 
     monkeypatch.setattr("app.application.write_back_gate.collect_native_quality_counts", forbidden_python_native_check)
-    monkeypatch.setattr("app.application.write_back_gate.count_native_write_protocol_issues", forbidden_python_native_check)
+    monkeypatch.setattr(
+        "app.application.write_back_gate.count_native_write_protocol_issues", forbidden_python_native_check
+    )
     handler = TranslationHandler(registry, LLMHandler())
     try:
         summary = await handler.write_back(
@@ -1695,9 +2117,7 @@ async def test_direct_write_back_rejects_active_runtime_read_error_before_font_s
     app_home = tmp_path / "app-home"
     app_home.mkdir()
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "text_translation_ja_to_zh_system.md"
-    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(
-        encoding="utf-8"
-    )
+    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(encoding="utf-8")
     setting_text = setting_text.replace(
         'system_prompt_file = "prompts/text_translation_ja_to_zh_system.md"',
         f'system_prompt_file = "{prompt_path.as_posix()}"',
@@ -1710,9 +2130,7 @@ async def test_direct_write_back_rejects_active_runtime_read_error_before_font_s
     old_font = "OldFont.woff"
     _ = (fonts_dir / old_font).write_bytes(b"old font")
     gamefont_css_path = fonts_dir / "gamefont.css"
-    original_css = (
-        "@font-face { font-family: GameFont; src: url('OldFont.woff'); }\n"
-    )
+    original_css = "@font-face { font-family: GameFont; src: url('OldFont.woff'); }\n"
     _ = gamefont_css_path.write_text(original_css, encoding="utf-8")
     replacement_font = tmp_path / "NotoSansSC-Regular.ttf"
     _ = replacement_font.write_bytes(b"new font")
@@ -1720,7 +2138,9 @@ async def test_direct_write_back_rejects_active_runtime_read_error_before_font_s
     plugins_path = minimal_game_dir / "js" / "plugins.js"
     plugins_text = plugins_path.read_text(encoding="utf-8")
     plugins = ensure_json_array(
-        coerce_json_value(cast(object, json.loads(plugins_text[plugins_text.index("["):plugins_text.rindex("]") + 1]))),
+        coerce_json_value(
+            cast(object, json.loads(plugins_text[plugins_text.index("[") : plugins_text.rindex("]") + 1]))
+        ),
         "plugins",
     )
     plugins.append({"name": "BrokenEncoding", "status": True, "description": "", "parameters": {}})
@@ -1788,21 +2208,26 @@ async def test_direct_write_back_rejects_active_runtime_read_error_before_font_s
             ),
             reviewed_empty=True,
         )
-        scope = await TextScopeService().build(
+        analysis_context = await build_game_analysis_context(
             session=session,
             game_data=game_data,
             text_rules=text_rules,
         )
+        scope = analysis_context.scope
         await session.replace_rule_review_state(
             rule_domain=STRUCTURED_PLACEHOLDER_RULE_DOMAIN,
-            scope_hash=structured_placeholder_scope_hash(
-                translation_data_map=scope.translation_data_map,
-                structured_rules=(),
+            scope_hash=structured_placeholder_scope_hash_from_analysis(
+                analyze_structured_placeholder_candidates(scope.translation_data_map, text_rules)
             ),
             reviewed_empty=True,
         )
-        await session.write_translation_items(
-            [
+        await _write_current_translation_items(
+            session=session,
+            game_data=game_data,
+            setting=setting,
+            text_rules=text_rules,
+            scope=scope,
+            items=[
                 TranslationItem(
                     location_path=item.location_path,
                     item_type=item.item_type,
@@ -1810,12 +2235,11 @@ async def test_direct_write_back_rejects_active_runtime_read_error_before_font_s
                     original_lines=[line for line in item.original_lines],
                     source_line_paths=[path for path in item.source_line_paths],
                     translation_lines=[
-                        _translated_test_line_preserving_controls(line, text_rules)
-                        for line in item.original_lines
+                        _translated_test_line_preserving_controls(line, text_rules) for line in item.original_lines
                     ],
                 )
                 for item in scope.active_items()
-            ]
+            ],
         )
 
     handler = TranslationHandler(registry, LLMHandler())
@@ -1847,9 +2271,7 @@ async def test_direct_write_terminology_rejects_missing_workflow_rules(
     app_home = tmp_path / "app-home"
     app_home.mkdir()
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "text_translation_ja_to_zh_system.md"
-    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(
-        encoding="utf-8"
-    )
+    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(encoding="utf-8")
     setting_text = setting_text.replace(
         'system_prompt_file = "prompts/text_translation_ja_to_zh_system.md"',
         f'system_prompt_file = "{prompt_path.as_posix()}"',
@@ -1953,11 +2375,7 @@ async def test_mv_virtual_name_box_write_back_rebuilds_speaker_lines(minimal_mv_
         get_default_text_rules(),
         mv_virtual_namebox_rule_records=mv_namebox_rules,
     ).extract_all_text()
-    items_by_path = {
-        item.location_path: item
-        for data in extracted.values()
-        for item in data.translation_items
-    }
+    items_by_path = {item.location_path: item for data in extracted.values() for item in data.translation_items}
     items_by_path["CommonEvents.json/2/0"].translation_lines = ["你好"]
     items_by_path["CommonEvents.json/3/0"].translation_lines = ["你好」"]
     items_by_path["CommonEvents.json/4/0"].translation_lines = ["欢迎光临"]
@@ -2012,16 +2430,63 @@ async def test_mv_virtual_name_box_write_back_rebuilds_speaker_lines(minimal_mv_
         "CommonEvents[8].list",
     )
 
-    assert ensure_json_array(ensure_json_object(standalone_commands[1], "standalone.speaker")["parameters"], "standalone.speaker.parameters")[0] == "向导："
-    assert ensure_json_array(ensure_json_object(standalone_commands[2], "standalone.body")["parameters"], "standalone.body.parameters")[0] == "你好"
-    assert ensure_json_array(ensure_json_object(inline_commands[1], "inline.speaker")["parameters"], "inline.speaker.parameters")[0] == "向导「你好」"
-    assert ensure_json_array(ensure_json_object(yep_commands[1], "yep.speaker")["parameters"], "yep.speaker.parameters")[0] == "\\n<店员>欢迎光临"
-    assert ensure_json_array(ensure_json_object(actor_commands[1], "actor.speaker")["parameters"], "actor.speaker.parameters")[0] == "勇者:勇者正文"
-    assert ensure_json_array(ensure_json_object(angle_commands[1], "angle.speaker")["parameters"], "angle.speaker.parameters")[0] == "<向导>"
-    assert ensure_json_array(ensure_json_object(angle_commands[2], "angle.body")["parameters"], "angle.body.parameters")[0] == "独立正文"
-    assert ensure_json_array(ensure_json_object(upper_commands[1], "upper.speaker")["parameters"], "upper.speaker.parameters")[0] == "\\N<店员>大写正文"
-    assert ensure_json_array(ensure_json_object(dynamic_commands[1], "dynamic.speaker")["parameters"], "dynamic.speaker.parameters")[0] == "<\\n[1]>"
-    assert ensure_json_array(ensure_json_object(dynamic_commands[2], "dynamic.body")["parameters"], "dynamic.body.parameters")[0] == "动态正文"
+    assert (
+        ensure_json_array(
+            ensure_json_object(standalone_commands[1], "standalone.speaker")["parameters"],
+            "standalone.speaker.parameters",
+        )[0]
+        == "向导："
+    )
+    assert (
+        ensure_json_array(
+            ensure_json_object(standalone_commands[2], "standalone.body")["parameters"], "standalone.body.parameters"
+        )[0]
+        == "你好"
+    )
+    assert (
+        ensure_json_array(
+            ensure_json_object(inline_commands[1], "inline.speaker")["parameters"], "inline.speaker.parameters"
+        )[0]
+        == "向导「你好」"
+    )
+    assert (
+        ensure_json_array(ensure_json_object(yep_commands[1], "yep.speaker")["parameters"], "yep.speaker.parameters")[0]
+        == "\\n<店员>欢迎光临"
+    )
+    assert (
+        ensure_json_array(
+            ensure_json_object(actor_commands[1], "actor.speaker")["parameters"], "actor.speaker.parameters"
+        )[0]
+        == "勇者:勇者正文"
+    )
+    assert (
+        ensure_json_array(
+            ensure_json_object(angle_commands[1], "angle.speaker")["parameters"], "angle.speaker.parameters"
+        )[0]
+        == "<向导>"
+    )
+    assert (
+        ensure_json_array(ensure_json_object(angle_commands[2], "angle.body")["parameters"], "angle.body.parameters")[0]
+        == "独立正文"
+    )
+    assert (
+        ensure_json_array(
+            ensure_json_object(upper_commands[1], "upper.speaker")["parameters"], "upper.speaker.parameters"
+        )[0]
+        == "\\N<店员>大写正文"
+    )
+    assert (
+        ensure_json_array(
+            ensure_json_object(dynamic_commands[1], "dynamic.speaker")["parameters"], "dynamic.speaker.parameters"
+        )[0]
+        == "<\\n[1]>"
+    )
+    assert (
+        ensure_json_array(
+            ensure_json_object(dynamic_commands[2], "dynamic.body")["parameters"], "dynamic.body.parameters"
+        )[0]
+        == "动态正文"
+    )
 
 
 @pytest.mark.asyncio
@@ -2034,9 +2499,7 @@ async def test_native_write_back_rebuilds_mv_virtual_name_box_runtime_files(
     app_home = tmp_path / "app-home"
     app_home.mkdir()
     prompt_path = Path(__file__).resolve().parents[1] / "prompts" / "text_translation_ja_to_zh_system.md"
-    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(
-        encoding="utf-8"
-    )
+    setting_text = (Path(__file__).resolve().parents[1] / "setting.example.toml").read_text(encoding="utf-8")
     setting_text = setting_text.replace(
         'system_prompt_file = "prompts/text_translation_ja_to_zh_system.md"',
         f'system_prompt_file = "{prompt_path.as_posix()}"',
@@ -2081,7 +2544,7 @@ async def test_native_write_back_rebuilds_mv_virtual_name_box_runtime_files(
     _ = await registry.register_game(minimal_mv_game_dir, source_language="ja")
     async with await registry.open_game("MVテストゲーム") as session:
         await session.replace_mv_virtual_namebox_rules(_mv_virtual_namebox_rule_records())
-        game_data, _setting, text_rules = await _prepare_write_gate_session(
+        game_data, setting, text_rules = await _prepare_write_gate_session(
             session=session,
             game_dir=minimal_mv_game_dir,
             registry=TerminologyRegistry(
@@ -2089,18 +2552,24 @@ async def test_native_write_back_rebuilds_mv_virtual_name_box_runtime_files(
             ),
             glossary=TerminologyGlossary(terms={"案内人": "向导", "MV勇者": "勇者"}),
         )
-        scope = await TextScopeService().build(
+        analysis_context = await build_game_analysis_context(
             session=session,
             game_data=game_data,
             text_rules=text_rules,
         )
+        scope = analysis_context.scope
         custom_translations = {
             "CommonEvents.json/2/0": ["你好"],
             "CommonEvents.json/3/0": ["你好」"],
             "CommonEvents.json/4/0": ["勇者正文"],
         }
-        await session.write_translation_items(
-            [
+        await _write_current_translation_items(
+            session=session,
+            game_data=game_data,
+            setting=setting,
+            text_rules=text_rules,
+            scope=scope,
+            items=[
                 TranslationItem(
                     location_path=item.location_path,
                     item_type=item.item_type,
@@ -2109,14 +2578,11 @@ async def test_native_write_back_rebuilds_mv_virtual_name_box_runtime_files(
                     source_line_paths=[path for path in item.source_line_paths],
                     translation_lines=custom_translations.get(
                         item.location_path,
-                        [
-                            _translated_test_line_preserving_controls(line, text_rules)
-                            for line in item.original_lines
-                        ],
+                        [_translated_test_line_preserving_controls(line, text_rules) for line in item.original_lines],
                     ),
                 )
                 for item in scope.active_items()
-            ]
+            ],
         )
 
     handler = TranslationHandler(registry, LLMHandler())
@@ -2143,10 +2609,31 @@ async def test_native_write_back_rebuilds_mv_virtual_name_box_runtime_files(
     )
 
     assert summary.data_item_count >= 3
-    assert ensure_json_array(ensure_json_object(standalone_commands[1], "standalone.speaker")["parameters"], "standalone.speaker.parameters")[0] == "向导："
-    assert ensure_json_array(ensure_json_object(standalone_commands[2], "standalone.body")["parameters"], "standalone.body.parameters")[0] == "你好"
-    assert ensure_json_array(ensure_json_object(inline_commands[1], "inline.speaker")["parameters"], "inline.speaker.parameters")[0] == "向导「你好」"
-    assert ensure_json_array(ensure_json_object(actor_commands[1], "actor.speaker")["parameters"], "actor.speaker.parameters")[0] == "勇者:勇者正文"
+    assert (
+        ensure_json_array(
+            ensure_json_object(standalone_commands[1], "standalone.speaker")["parameters"],
+            "standalone.speaker.parameters",
+        )[0]
+        == "向导："
+    )
+    assert (
+        ensure_json_array(
+            ensure_json_object(standalone_commands[2], "standalone.body")["parameters"], "standalone.body.parameters"
+        )[0]
+        == "你好"
+    )
+    assert (
+        ensure_json_array(
+            ensure_json_object(inline_commands[1], "inline.speaker")["parameters"], "inline.speaker.parameters"
+        )[0]
+        == "向导「你好」"
+    )
+    assert (
+        ensure_json_array(
+            ensure_json_object(actor_commands[1], "actor.speaker")["parameters"], "actor.speaker.parameters"
+        )[0]
+        == "勇者:勇者正文"
+    )
 
 
 @pytest.mark.asyncio
@@ -2245,8 +2732,16 @@ async def test_mv_virtual_name_box_write_back_keeps_dynamic_speaker_without_tran
         "CommonEvents[2].list",
     )
 
-    assert ensure_json_array(ensure_json_object(commands[1], "dynamic.speaker")["parameters"], "dynamic.speaker.parameters")[0] == "<\\n[1]>"
-    assert ensure_json_array(ensure_json_object(commands[2], "dynamic.body")["parameters"], "dynamic.body.parameters")[0] == "动态正文"
+    assert (
+        ensure_json_array(
+            ensure_json_object(commands[1], "dynamic.speaker")["parameters"], "dynamic.speaker.parameters"
+        )[0]
+        == "<\\n[1]>"
+    )
+    assert (
+        ensure_json_array(ensure_json_object(commands[2], "dynamic.body")["parameters"], "dynamic.body.parameters")[0]
+        == "动态正文"
+    )
 
 
 @pytest.mark.asyncio
@@ -2490,9 +2985,9 @@ async def test_force_full_restore_rewrites_all_runtime_files_from_source_snapsho
     system_origin = _read_test_json(minimal_game_dir / "data_origin" / "System.json")
     animation_origin = _read_test_json(minimal_game_dir / "data_origin" / "Animations.json")
     plugins_origin_text = (minimal_game_dir / "js" / "plugins_origin.js").read_text(encoding="utf-8")
-    plugin_source_origin_text = (
-        minimal_game_dir / "js" / "plugins_source_origin" / "TestPlugin.js"
-    ).read_text(encoding="utf-8")
+    plugin_source_origin_text = (minimal_game_dir / "js" / "plugins_source_origin" / "TestPlugin.js").read_text(
+        encoding="utf-8"
+    )
 
     _ = (minimal_game_dir / "data" / "System.json").write_text("{}", encoding="utf-8")
     (minimal_game_dir / "data" / "Animations.json").unlink()
@@ -2508,17 +3003,15 @@ async def test_force_full_restore_rewrites_all_runtime_files_from_source_snapsho
     )
     write_game_files(
         game_data,
-        minimal_game_dir,
         force_full_restore=True,
     )
 
     assert _read_test_json(minimal_game_dir / "data" / "System.json") == system_origin
     assert _read_test_json(minimal_game_dir / "data" / "Animations.json") == animation_origin
     assert (minimal_game_dir / "js" / "plugins.js").read_text(encoding="utf-8") == plugins_origin_text
-    assert (
-        (minimal_game_dir / "js" / "plugins" / "TestPlugin.js").read_text(encoding="utf-8")
-        == plugin_source_origin_text
-    )
+    assert (minimal_game_dir / "js" / "plugins" / "TestPlugin.js").read_text(
+        encoding="utf-8"
+    ) == plugin_source_origin_text
 
 
 @pytest.mark.asyncio
@@ -2578,7 +3071,7 @@ async def test_mv_write_back_uses_www_active_and_origin_paths(minimal_mv_game_di
     system_object["gameTitle"] = "MV测试游戏"
     game_data.writable_data[PLUGINS_FILE_NAME] = "var $plugins = [];\n"
 
-    write_game_files(game_data, minimal_mv_game_dir)
+    write_game_files(game_data)
 
     assert (minimal_mv_game_dir / "www" / "data_origin" / "System.json").exists()
     assert (minimal_mv_game_dir / "www" / "js" / "plugins_origin.js").exists()
@@ -2596,11 +3089,7 @@ async def test_data_extraction_covers_core_text_sources(minimal_game_dir: Path) 
     """正文提取覆盖正文文本，并排除术语表直接写回字段。"""
     game_data = await load_game_data(minimal_game_dir)
     extracted = DataTextExtraction(game_data, get_default_text_rules()).extract_all_text()
-    paths = {
-        item.location_path
-        for data in extracted.values()
-        for item in data.translation_items
-    }
+    paths = {item.location_path for data in extracted.values() for item in data.translation_items}
 
     assert "Map001.json/1/0/0" in paths
     assert "CommonEvents.json/1/0" in paths
@@ -2658,11 +3147,7 @@ async def test_data_extraction_strips_outer_whitespace_from_core_sources(minimal
 
     game_data = await load_game_data(minimal_game_dir)
     extracted = DataTextExtraction(game_data, get_default_text_rules()).extract_all_text()
-    items_by_path = {
-        item.location_path: item
-        for data in extracted.values()
-        for item in data.translation_items
-    }
+    items_by_path = {item.location_path: item for data in extracted.values() for item in data.translation_items}
 
     assert items_by_path["System.json/gameTitle"].original_lines == ["テストゲーム"]
     assert items_by_path["CommonEvents.json/1/2"].original_lines == ["はい", "いいえ"]
@@ -2683,9 +3168,7 @@ async def test_note_tag_rules_extract_and_write_back_only_target_values(minimal_
     game_data = await load_game_data(minimal_game_dir)
     standard_extracted = DataTextExtraction(game_data, get_default_text_rules()).extract_all_text()
     standard_paths = {
-        candidate.location_path
-        for data in standard_extracted.values()
-        for candidate in data.translation_items
+        candidate.location_path for data in standard_extracted.values() for candidate in data.translation_items
     }
     note_extracted = NoteTagTextExtraction(
         game_data=game_data,
@@ -2732,16 +3215,20 @@ async def test_note_tag_multiline_value_keeps_line_break_structure_before_write_
     )
 
     game_data = await load_game_data(minimal_game_dir)
-    note_items = NoteTagTextExtraction(
-        game_data=game_data,
-        rule_records=[
-            NoteTagTextRuleRecord(
-                file_name="Items.json",
-                tag_names=["拡張説明"],
-            )
-        ],
-        text_rules=text_rules,
-    ).extract_all_text()["Items.json"].translation_items
+    note_items = (
+        NoteTagTextExtraction(
+            game_data=game_data,
+            rule_records=[
+                NoteTagTextRuleRecord(
+                    file_name="Items.json",
+                    tag_names=["拡張説明"],
+                )
+            ],
+            text_rules=text_rules,
+        )
+        .extract_all_text()["Items.json"]
+        .translation_items
+    )
     note_items[0].translation_lines = ["说明\n「甲乙，丙丁」"]
 
     reset_writable_copies(game_data)
@@ -2782,11 +3269,15 @@ async def test_note_tag_json_string_leaf_uses_visible_text_protocol(minimal_game
         import_file={"Items.json": ["拡張説明"]},
         text_rules=get_default_text_rules(),
     )
-    note_items = NoteTagTextExtraction(
-        game_data=game_data,
-        rule_records=rule_records,
-        text_rules=get_default_text_rules(),
-    ).extract_all_text()["Items.json"].translation_items
+    note_items = (
+        NoteTagTextExtraction(
+            game_data=game_data,
+            rule_records=rule_records,
+            text_rules=get_default_text_rules(),
+        )
+        .extract_all_text()["Items.json"]
+        .translation_items
+    )
 
     assert note_items[0].original_lines == [source_note.strip()]
 
@@ -2835,11 +3326,15 @@ async def test_map_event_note_tag_rules_extract_and_write_back(minimal_game_dir:
         import_file={"Map*.json": ["namePop"]},
         text_rules=get_default_text_rules(),
     )
-    note_items = NoteTagTextExtraction(
-        game_data=game_data,
-        rule_records=rule_records,
-        text_rules=get_default_text_rules(),
-    ).extract_all_text()["Map001.json"].translation_items
+    note_items = (
+        NoteTagTextExtraction(
+            game_data=game_data,
+            rule_records=rule_records,
+            text_rules=get_default_text_rules(),
+        )
+        .extract_all_text()["Map001.json"]
+        .translation_items
+    )
 
     assert [item.location_path for item in note_items] == ["Map001.json/events/2/note/namePop"]
     assert note_items[0].original_lines == ["導き手"]
@@ -2859,9 +3354,7 @@ async def test_fixture_custom_control_sequences_can_be_protected(minimal_game_di
     """测试夹具里的自定义控制符可通过外部规则保护。"""
     text_rules = TextRules.from_setting(
         TextRulesSetting(),
-        custom_placeholder_rules=(
-            CustomPlaceholderRule.create(r"\\F\[[^\]]+\]", "[CUSTOM_FACE_PORTRAIT_{index}]"),
-        ),
+        custom_placeholder_rules=(CustomPlaceholderRule.create(r"\\F\[[^\]]+\]", "[CUSTOM_FACE_PORTRAIT_{index}]"),),
     )
     game_data = await load_game_data(minimal_game_dir)
     extracted = DataTextExtraction(game_data, text_rules).extract_all_text()
@@ -3020,11 +3513,23 @@ async def test_write_back_inserts_401_without_shifting_later_name_block(minimal_
     commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
 
     assert ensure_json_object(commands[0], "command0")["code"] == 101
-    assert ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0] == "前半译文一"
-    assert ensure_json_array(ensure_json_object(commands[2], "command2")["parameters"], "command2.parameters")[0] == "前半译文二"
-    assert ensure_json_array(ensure_json_object(commands[3], "command3")["parameters"], "command3.parameters")[0] == "前半译文三"
+    assert (
+        ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0]
+        == "前半译文一"
+    )
+    assert (
+        ensure_json_array(ensure_json_object(commands[2], "command2")["parameters"], "command2.parameters")[0]
+        == "前半译文二"
+    )
+    assert (
+        ensure_json_array(ensure_json_object(commands[3], "command3")["parameters"], "command3.parameters")[0]
+        == "前半译文三"
+    )
     assert ensure_json_object(commands[4], "command4")["code"] == 101
-    assert ensure_json_array(ensure_json_object(commands[5], "command5")["parameters"], "command5.parameters")[0] == "后半译文"
+    assert (
+        ensure_json_array(ensure_json_object(commands[5], "command5")["parameters"], "command5.parameters")[0]
+        == "后半译文"
+    )
 
 
 @pytest.mark.asyncio
@@ -3060,9 +3565,15 @@ async def test_write_back_deletes_401_without_shifting_later_name_block(minimal_
     commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
 
     assert ensure_json_object(commands[0], "command0")["code"] == 101
-    assert ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0] == "前半译文"
+    assert (
+        ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0]
+        == "前半译文"
+    )
     assert ensure_json_object(commands[2], "command2")["code"] == 101
-    assert ensure_json_array(ensure_json_object(commands[3], "command3")["parameters"], "command3.parameters")[0] == "后半译文"
+    assert (
+        ensure_json_array(ensure_json_object(commands[3], "command3")["parameters"], "command3.parameters")[0]
+        == "后半译文"
+    )
     assert ensure_json_object(commands[4], "command4")["code"] == 0
 
 
@@ -3092,9 +3603,17 @@ async def test_write_data_text_splits_overwide_long_text_before_write_back(minim
     common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
     commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
 
-    assert ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0] == "甲乙丙"
-    assert ensure_json_array(ensure_json_object(commands[2], "command2")["parameters"], "command2.parameters")[0] == "丁戊己"
-    assert ensure_json_array(ensure_json_object(commands[3], "command3")["parameters"], "command3.parameters")[0] == "庚辛"
+    assert (
+        ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0]
+        == "甲乙丙"
+    )
+    assert (
+        ensure_json_array(ensure_json_object(commands[2], "command2")["parameters"], "command2.parameters")[0]
+        == "丁戊己"
+    )
+    assert (
+        ensure_json_array(ensure_json_object(commands[3], "command3")["parameters"], "command3.parameters")[0] == "庚辛"
+    )
 
 
 @pytest.mark.asyncio
@@ -3116,8 +3635,14 @@ async def test_write_data_text_indents_wrapping_punctuation_continuation_lines(m
     common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
     commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
 
-    assert ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0] == "「甲乙丙。"
-    assert ensure_json_array(ensure_json_object(commands[2], "command2")["parameters"], "command2.parameters")[0] == "　丁戊己」"
+    assert (
+        ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0]
+        == "「甲乙丙。"
+    )
+    assert (
+        ensure_json_array(ensure_json_object(commands[2], "command2")["parameters"], "command2.parameters")[0]
+        == "　丁戊己」"
+    )
 
 
 @pytest.mark.asyncio
@@ -3140,8 +3665,14 @@ async def test_write_data_text_restores_converted_outer_quote_before_indent(mini
     common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
     commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
 
-    assert ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0] == "「甲乙丙。"
-    assert ensure_json_array(ensure_json_object(commands[2], "command2")["parameters"], "command2.parameters")[0] == "　丁戊己。」"
+    assert (
+        ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0]
+        == "「甲乙丙。"
+    )
+    assert (
+        ensure_json_array(ensure_json_object(commands[2], "command2")["parameters"], "command2.parameters")[0]
+        == "　丁戊己。」"
+    )
 
 
 @pytest.mark.asyncio
@@ -3164,7 +3695,10 @@ async def test_write_data_text_restores_mismatched_source_quote_slots(minimal_ga
     common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
     commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
 
-    assert ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0] == "这就是『秒杀技术」……！"
+    assert (
+        ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0]
+        == "这就是『秒杀技术」……！"
+    )
 
 
 @pytest.mark.asyncio
@@ -3212,11 +3746,23 @@ async def test_scroll_text_commands_are_grouped_by_adjacent_405(minimal_game_dir
     common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
     common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
     commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
-    assert ensure_json_array(ensure_json_object(commands[2], "command2")["parameters"], "command2.parameters")[0] == "滚动第一行"
-    assert ensure_json_array(ensure_json_object(commands[3], "command3")["parameters"], "command3.parameters")[0] == "滚动第二行"
-    assert ensure_json_array(ensure_json_object(commands[4], "command4")["parameters"], "command4.parameters")[0] == "滚动第三行"
+    assert (
+        ensure_json_array(ensure_json_object(commands[2], "command2")["parameters"], "command2.parameters")[0]
+        == "滚动第一行"
+    )
+    assert (
+        ensure_json_array(ensure_json_object(commands[3], "command3")["parameters"], "command3.parameters")[0]
+        == "滚动第二行"
+    )
+    assert (
+        ensure_json_array(ensure_json_object(commands[4], "command4")["parameters"], "command4.parameters")[0]
+        == "滚动第三行"
+    )
     assert ensure_json_array(ensure_json_object(commands[5], "command5")["parameters"], "command5.parameters")[0] == ""
-    assert ensure_json_array(ensure_json_object(commands[6], "command6")["parameters"], "command6.parameters")[0] == "另一段"
+    assert (
+        ensure_json_array(ensure_json_object(commands[6], "command6")["parameters"], "command6.parameters")[0]
+        == "另一段"
+    )
 
 
 @pytest.mark.asyncio
@@ -3249,7 +3795,10 @@ async def test_long_text_write_back_deletes_extra_original_lines(minimal_game_di
     common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
     common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
     commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
-    assert ensure_json_array(ensure_json_object(commands[0], "command0")["parameters"], "command0.parameters")[0] == "滚动第一行"
+    assert (
+        ensure_json_array(ensure_json_object(commands[0], "command0")["parameters"], "command0.parameters")[0]
+        == "滚动第一行"
+    )
     assert ensure_json_object(commands[1], "command1")["code"] == 0
 
 
@@ -3282,7 +3831,10 @@ async def test_long_text_write_back_ignores_trailing_empty_translation_lines(min
     common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
     common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
     commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
-    assert ensure_json_array(ensure_json_object(commands[0], "command0")["parameters"], "command0.parameters")[0] == "滚动第一行"
+    assert (
+        ensure_json_array(ensure_json_object(commands[0], "command0")["parameters"], "command0.parameters")[0]
+        == "滚动第一行"
+    )
     assert ensure_json_object(commands[1], "command1")["code"] == 0
 
 
@@ -3301,7 +3853,7 @@ async def test_first_write_back_archives_complete_original_data_snapshot(minimal
 
     reset_writable_copies(game_data)
     write_data_text(game_data, [item])
-    write_game_files(game_data, minimal_game_dir)
+    write_game_files(game_data)
 
     origin_data_dir = minimal_game_dir / "data_origin"
     origin_data_names = sorted(path.name for path in origin_data_dir.glob("*.json"))
@@ -3341,7 +3893,7 @@ async def test_written_game_reads_complete_origin_without_mutating_snapshot(mini
     common_item.translation_lines = ["你好"]
     reset_writable_copies(first_game_data)
     write_data_text(first_game_data, [common_item])
-    write_game_files(first_game_data, minimal_game_dir)
+    write_game_files(first_game_data)
     origin_data_dir = minimal_game_dir / "data_origin"
     origin_snapshot = {
         path.name: path.read_text(encoding="utf-8")
@@ -3365,7 +3917,7 @@ async def test_written_game_reads_complete_origin_without_mutating_snapshot(mini
     actor_item.translation_lines = ["角色简介译文"]
     reset_writable_copies(reloaded_game_data)
     write_data_text(reloaded_game_data, [actor_item])
-    write_game_files(reloaded_game_data, minimal_game_dir)
+    write_game_files(reloaded_game_data)
     assert {
         path.name: path.read_text(encoding="utf-8")
         for path in sorted(origin_data_dir.glob("*.json"), key=lambda candidate: candidate.name)
@@ -3385,7 +3937,7 @@ async def test_written_game_reads_complete_origin_without_mutating_snapshot(mini
     plugin_text = plugin_game_data.writable_data[PLUGINS_FILE_NAME]
     assert isinstance(plugin_text, str)
     plugin_game_data.writable_data[PLUGINS_FILE_NAME] = plugin_text.replace("プラグイン本文", "插件正文")
-    write_game_files(plugin_game_data, minimal_game_dir)
+    write_game_files(plugin_game_data)
 
     origin_plugins_path = minimal_game_dir / "js" / "plugins_origin.js"
     assert origin_plugins_path.exists()
@@ -3472,284 +4024,3 @@ async def test_loader_separates_translation_source_and_active_runtime_data(minim
     message = str(exc_info.value)
     assert "激活数据目录" in message
     assert "Animations.json" in message
-
-
-@pytest.mark.asyncio
-async def test_font_replacement_updates_only_writable_outputs(
-    minimal_game_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """字体替换只作用于本轮可写副本，并复制目标字体到游戏目录。"""
-    fonts_dir = minimal_game_dir / "fonts"
-    fonts_dir.mkdir()
-    old_font = "OldFont.woff"
-    another_font = "AnotherFont.woff"
-    _ = (fonts_dir / old_font).write_bytes(b"old font")
-    _ = (fonts_dir / another_font).write_bytes(b"another font")
-    replacement_font = tmp_path / "NotoSansSC-Regular.ttf"
-    _ = replacement_font.write_bytes(b"new font")
-
-    game_data = await load_game_data(minimal_game_dir)
-    reset_writable_copies(game_data)
-    system = ensure_json_object(game_data.writable_data["System.json"], "System")
-    system["advanced"] = {
-        "mainFontFilename": old_font,
-        "numberFontFilename": another_font,
-    }
-    plugin = ensure_json_object(game_data.writable_plugins_js[0], "plugins[0]")
-    parameters = ensure_json_object(plugin["parameters"], "plugins[0].parameters")
-    parameters["FontFace"] = old_font
-    parameters["FontStem"] = Path(old_font).stem
-    parameters["Nested"] = json.dumps(
-        {"font": another_font, "text": "プラグイン本文"},
-        ensure_ascii=False,
-    )
-    parameters["HelpText"] = f"请在设置中选择 {Path(old_font).stem} 字体。"
-
-    summary = apply_font_replacement(
-        game_data=game_data,
-        game_root=minimal_game_dir,
-        replacement_font_path=str(replacement_font),
-    )
-
-    replacement_name = replacement_font.name
-    assert (fonts_dir / replacement_name).exists()
-    assert summary.target_font_name == replacement_name
-    assert summary.source_font_count == 2
-    assert summary.replaced_reference_count == 5
-    assert len(summary.records) == 5
-    writable_system = ensure_json_object(game_data.writable_data["System.json"], "System")
-    advanced = ensure_json_object(writable_system["advanced"], "System.advanced")
-    writable_plugin = ensure_json_object(game_data.writable_plugins_js[0], "plugins[0]")
-    writable_parameters = ensure_json_object(writable_plugin["parameters"], "plugins[0].parameters")
-    assert advanced["mainFontFilename"] == replacement_name
-    assert advanced["numberFontFilename"] == replacement_name
-    assert writable_parameters["FontFace"] == replacement_name
-    assert writable_parameters["FontStem"] == replacement_name
-    nested_text = writable_parameters["Nested"]
-    assert isinstance(nested_text, str)
-    nested_value = ensure_json_object(coerce_json_value(cast(object, json.loads(nested_text))), "Nested")
-    assert nested_value["font"] == replacement_name
-    assert nested_value["text"] == "プラグイン本文"
-    assert writable_parameters["HelpText"] == f"请在设置中选择 {Path(old_font).stem} 字体。"
-    original_system = json.dumps(game_data.data["System.json"], ensure_ascii=False)
-    assert old_font not in original_system
-    assert another_font not in original_system
-
-    assert replacement_name not in original_system
-
-
-@pytest.mark.asyncio
-async def test_mv_font_replacement_updates_gamefont_css_and_css_declared_font_stems(
-    minimal_mv_game_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """MV 字体覆盖会同步改写 gamefont.css，并识别样式表里声明但缺失的旧字体。"""
-    fonts_dir = minimal_mv_game_dir / "www" / "fonts"
-    fonts_dir.mkdir()
-    old_font = "YujiSyuku-Regular.ttf"
-    css_only_font = "衡山毛筆フォント_0.TTF"
-    _ = (fonts_dir / old_font).write_bytes(b"old font")
-    gamefont_css_path = fonts_dir / "gamefont.css"
-    _ = gamefont_css_path.write_text(
-        "\n".join(
-            [
-                "@font-face {",
-                "  font-family: GameFont;",
-                "  src: url('YujiSyuku-Regular.ttf');",
-                "}",
-                "@font-face {",
-                "  font-family: 'GameFont2';",
-                f"  src: url(\"{css_only_font}\");",
-                "}",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    replacement_font = tmp_path / "NotoSansSC-Regular.ttf"
-    _ = replacement_font.write_bytes(b"new font")
-
-    game_data = await load_game_data(minimal_mv_game_dir)
-    reset_writable_copies(game_data)
-    plugin = ensure_json_object(game_data.writable_plugins_js[0], "plugins[0]")
-    parameters = ensure_json_object(plugin["parameters"], "plugins[0].parameters")
-    parameters["BrushFont"] = Path(css_only_font).stem
-    common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
-    common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
-    command_list = ensure_json_array(common_event["list"], "CommonEvents[1].list")
-    command = ensure_json_object(command_list[2], "CommonEvents[1].list[2]")
-    command["parameters"] = ["MultiFont change GameFont2"]
-
-    summary = apply_font_replacement(
-        game_data=game_data,
-        game_root=minimal_mv_game_dir,
-        replacement_font_path=str(replacement_font),
-    )
-
-    replacement_name = replacement_font.name
-    origin_css_path = fonts_dir / "gamefont_origin.css"
-    active_css = gamefont_css_path.read_text(encoding="utf-8")
-    origin_css = origin_css_path.read_text(encoding="utf-8")
-    writable_plugin = ensure_json_object(game_data.writable_plugins_js[0], "plugins[0]")
-    writable_parameters = ensure_json_object(writable_plugin["parameters"], "plugins[0].parameters")
-    writable_common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
-    writable_common_event = ensure_json_object(writable_common_events[1], "CommonEvents[1]")
-    writable_command_list = ensure_json_array(writable_common_event["list"], "CommonEvents[1].list")
-    writable_command = ensure_json_object(writable_command_list[2], "CommonEvents[1].list[2]")
-
-    assert (fonts_dir / replacement_name).exists()
-    assert origin_css_path.exists()
-    assert "YujiSyuku-Regular.ttf" in origin_css
-    assert "衡山毛筆フォント_0.TTF" in origin_css
-    assert active_css.count(replacement_name) == 2
-    assert "YujiSyuku-Regular.ttf" not in active_css
-    assert "衡山毛筆フォント_0.TTF" not in active_css
-    assert writable_parameters["BrushFont"] == replacement_name
-    assert writable_command["parameters"] == ["MultiFont change GameFont2"]
-    assert summary.source_font_count == 2
-    assert summary.replaced_reference_count == 3
-    assert len(summary.records) == 3
-
-
-@pytest.mark.asyncio
-async def test_restore_font_references_restores_mv_gamefont_css_without_rolling_back_other_css(
-    minimal_mv_game_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """字体还原会按 gamefont.css 原始备份恢复 MV 字体族入口。"""
-    fonts_dir = minimal_mv_game_dir / "www" / "fonts"
-    fonts_dir.mkdir()
-    old_font = "YujiSyuku-Regular.ttf"
-    css_only_font = "衡山毛筆フォント_0.TTF"
-    _ = (fonts_dir / old_font).write_bytes(b"old font")
-    gamefont_css_path = fonts_dir / "gamefont.css"
-    _ = gamefont_css_path.write_text(
-        "\n".join(
-            [
-                "@font-face {",
-                "  font-family: GameFont;",
-                "  src: url('YujiSyuku-Regular.ttf');",
-                "}",
-                "@font-face {",
-                "  font-family: 'GameFont2';",
-                f"  src: url(\"{css_only_font}\");",
-                "}",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    replacement_font = tmp_path / "NotoSansSC-Regular.ttf"
-    _ = replacement_font.write_bytes(b"new font")
-
-    game_data = await load_game_data(minimal_mv_game_dir)
-    reset_writable_copies(game_data)
-    _ = apply_font_replacement(
-        game_data=game_data,
-        game_root=minimal_mv_game_dir,
-        replacement_font_path=str(replacement_font),
-    )
-    active_css = gamefont_css_path.read_text(encoding="utf-8")
-    _ = gamefont_css_path.write_text(
-        f"{active_css}\n/* 已写入译文后新增的样式 */\n",
-        encoding="utf-8",
-    )
-
-    restore_summary = restore_font_references_from_origin_backups(
-        game_root=minimal_mv_game_dir,
-        replacement_font_names=[replacement_font.name],
-    )
-
-    restored_css = gamefont_css_path.read_text(encoding="utf-8")
-    assert restore_summary.restored_field_count == 2
-    assert restore_summary.restored_reference_count == 2
-    assert "url('YujiSyuku-Regular.ttf')" in restored_css
-    assert "url(\"衡山毛筆フォント_0.TTF\")" in restored_css
-    assert replacement_font.name not in restored_css
-    assert "已写入译文后新增的样式" in restored_css
-
-
-@pytest.mark.asyncio
-async def test_restore_font_references_uses_origin_backups_without_rolling_back_text(
-    minimal_game_dir: Path,
-    tmp_path: Path,
-) -> None:
-    """字体还原按原始备份替回旧字体引用，不回滚已经写入的译文。"""
-    fonts_dir = minimal_game_dir / "fonts"
-    fonts_dir.mkdir()
-    old_font = "OldFont.woff"
-    another_font = "AnotherFont.woff"
-    _ = (fonts_dir / old_font).write_bytes(b"old font")
-    _ = (fonts_dir / another_font).write_bytes(b"another font")
-    replacement_font = tmp_path / "NotoSansSC-Regular.ttf"
-    _ = replacement_font.write_bytes(b"new font")
-
-    system_path = minimal_game_dir / "data" / "System.json"
-    raw_system = _read_test_json(system_path)
-    system = ensure_json_object(raw_system, "System.json")
-    system["advanced"] = {
-        "mainFontFilename": old_font,
-        "numberFontFilename": another_font,
-    }
-    _rewrite_json(system_path, raw_system)
-
-    base_game_data = await load_game_data(minimal_game_dir)
-    plugin = ensure_json_object(base_game_data.plugins_js[0], "plugins[0]")
-    parameters = ensure_json_object(plugin["parameters"], "plugins[0].parameters")
-    parameters["FontFace"] = old_font
-    parameters["FontStem"] = Path(old_font).stem
-    parameters["Nested"] = json.dumps(
-        {"font": another_font, "text": "プラグイン本文"},
-        ensure_ascii=False,
-    )
-    parameters["HelpText"] = f"请在设置中选择 {old_font} 字体。"
-    plugins_path = minimal_game_dir / "js" / "plugins.js"
-    _ = plugins_path.write_text(
-        f"var $plugins = {json.dumps(base_game_data.plugins_js, ensure_ascii=False, indent=2)};\n",
-        encoding="utf-8",
-    )
-
-    game_data = await load_game_data(minimal_game_dir)
-    reset_writable_copies(game_data)
-    writable_system = ensure_json_object(game_data.writable_data["System.json"], "System")
-    writable_system["gameTitle"] = "翻译标题"
-    writable_plugin = ensure_json_object(game_data.writable_plugins_js[0], "plugins[0]")
-    writable_parameters = ensure_json_object(writable_plugin["parameters"], "plugins[0].parameters")
-    replacement_name = replacement_font.name
-    writable_parameters["Nested"] = json.dumps(
-        {"font": another_font, "text": "插件正文"},
-        ensure_ascii=False,
-    )
-    writable_parameters["HelpText"] = f"请在设置中选择 {replacement_name} 字体。"
-
-    _ = apply_font_replacement(
-        game_data=game_data,
-        game_root=minimal_game_dir,
-        replacement_font_path=str(replacement_font),
-    )
-    write_game_files(game_data, minimal_game_dir)
-
-    restore_summary = restore_font_references_from_origin_backups(
-        game_root=minimal_game_dir,
-        replacement_font_names=[replacement_name],
-    )
-
-    assert restore_summary.restored_reference_count == 5
-    active_system = ensure_json_object(_read_test_json(system_path), "System.json")
-    active_advanced = ensure_json_object(active_system["advanced"], "System.advanced")
-    assert active_system["gameTitle"] == "翻译标题"
-    assert active_advanced["mainFontFilename"] == old_font
-    assert active_advanced["numberFontFilename"] == another_font
-
-    restored_plugins = read_plugins_js_file(plugins_path)
-    restored_plugin = ensure_json_object(restored_plugins[0], "plugins[0]")
-    restored_parameters = ensure_json_object(restored_plugin["parameters"], "plugins[0].parameters")
-    assert restored_parameters["FontFace"] == old_font
-    assert restored_parameters["FontStem"] == Path(old_font).stem
-    nested_text = restored_parameters["Nested"]
-    assert isinstance(nested_text, str)
-    nested_value = ensure_json_object(coerce_json_value(cast(object, json.loads(nested_text))), "Nested")
-    assert nested_value["font"] == another_font
-    assert nested_value["text"] == "插件正文"
-    assert restored_parameters["HelpText"] == f"请在设置中选择 {replacement_name} 字体。"

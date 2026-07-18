@@ -1,26 +1,29 @@
 """长文本译文行数适配与行宽兜底测试。"""
 
-import asyncio
 import json
 
 import pytest
 
 from app.config.schemas import TextRulesSetting
 from app.rmmz.control_codes import (
-    CustomPlaceholderRule,
     LITERAL_LINE_BREAK_PLACEHOLDER,
     REAL_LINE_BREAK_PLACEHOLDER,
+    CustomPlaceholderRule,
     StructuredPlaceholderRule,
 )
 from app.rmmz.schema import ItemType, TranslationErrorItem, TranslationItem
-from app.rmmz.text_rules import TextRules
 from app.rmmz.text_layout import (
     align_long_text_lines,
     count_line_width_chars,
     split_overwide_lines,
     split_overwide_single_text_value_if_needed,
 )
-from app.translation.verify import verify_translation_batch
+from app.rmmz.text_rules import TextRules
+from app.translation.batch import TranslationBatch, bind_translation_items
+from app.translation.verify import (
+    TranslationBatchVerification,
+    verify_translation_batch_result,
+)
 
 
 def _build_text_rules(*, width_limit: int) -> TextRules:
@@ -42,7 +45,7 @@ def _build_model_response(
 ) -> str:
     """构建新数组协议下的模型返回。"""
     response_item: dict[str, object] = {
-        "id": item.location_path,
+        "id": "T000001",
         "role": item.role or "",
         "source_lines": source_lines if source_lines is not None else list(item.original_lines),
         "translation_lines": translation_lines,
@@ -50,6 +53,25 @@ def _build_model_response(
     if extra_fields is not None:
         response_item.update(extra_fields)
     return json.dumps([response_item], ensure_ascii=False)
+
+
+def _verify_result(
+    *,
+    ai_result: str,
+    items: list[TranslationItem],
+    text_rules: TextRules,
+) -> TranslationBatchVerification:
+    """用生产纯结果接口校验一个测试批次。"""
+    return verify_translation_batch_result(
+        ai_result=ai_result,
+        batch=TranslationBatch(
+            bindings=bind_translation_items(items),
+            messages=[],
+            estimated_tokens=0,
+            token_limit=0,
+        ),
+        text_rules=text_rules,
+    )
 
 
 async def _verify_single_long_text(
@@ -65,24 +87,17 @@ async def _verify_single_long_text(
         original_lines=original_lines,
     )
     item.build_placeholders(text_rules)
-    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
-    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
-
-    await verify_translation_batch(
+    verification = _verify_result(
         ai_result=_build_model_response(
             item=item,
             translation_lines=translated_text.splitlines(),
         ),
         items=[item],
-        right_queue=right_queue,
-        error_queue=error_queue,
         text_rules=text_rules,
     )
 
-    assert error_queue.empty()
-    result = await right_queue.get()
-    assert result is not None
-    return result[0]
+    assert not verification.error_items
+    return verification.right_items[0]
 
 
 async def _verify_single_item(
@@ -93,19 +108,14 @@ async def _verify_single_item(
 ) -> tuple[list[TranslationItem] | None, list[TranslationErrorItem] | None]:
     """执行单条模型译文校验并返回成功或失败条目。"""
     item.build_placeholders(text_rules)
-    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
-    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
-
-    await verify_translation_batch(
+    verification = _verify_result(
         ai_result=_build_model_response(item=item, translation_lines=translation_lines),
         items=[item],
-        right_queue=right_queue,
-        error_queue=error_queue,
         text_rules=text_rules,
     )
 
-    right_items = None if right_queue.empty() else await right_queue.get()
-    error_items = None if error_queue.empty() else await error_queue.get()
+    right_items = verification.right_items or None
+    error_items = verification.error_items or None
     return right_items, error_items
 
 
@@ -139,9 +149,7 @@ async def test_structured_placeholder_residual_check_runs_before_shell_restore()
 
     right_items, error_items = await _verify_single_item(
         item=item,
-        translation_lines=[
-            "[CUSTOM_MINI_LABEL_OPEN_1]阿尔劳娜[CUSTOM_MINI_LABEL_CLOSE_1]"
-        ],
+        translation_lines=["[CUSTOM_MINI_LABEL_OPEN_1]阿尔劳娜[CUSTOM_MINI_LABEL_CLOSE_1]"],
         text_rules=text_rules,
     )
 
@@ -363,12 +371,10 @@ async def test_translation_response_accepts_minimal_output_protocol() -> None:
         original_lines=["こんにちは"],
     )
     item.build_placeholders(text_rules)
-    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
-    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
     ai_result = json.dumps(
         [
             {
-                "id": item.location_path,
+                "id": "T000001",
                 "role": item.role,
                 "translation_lines": ["你好"],
             }
@@ -376,18 +382,14 @@ async def test_translation_response_accepts_minimal_output_protocol() -> None:
         ensure_ascii=False,
     )
 
-    await verify_translation_batch(
+    verification = _verify_result(
         ai_result=ai_result,
         items=[item],
-        right_queue=right_queue,
-        error_queue=error_queue,
         text_rules=text_rules,
     )
 
-    assert error_queue.empty()
-    result = await right_queue.get()
-    assert result is not None
-    assert result[0].translation_lines == ["你好"]
+    assert not verification.error_items
+    assert verification.right_items[0].translation_lines == ["你好"]
 
 
 @pytest.mark.asyncio
@@ -401,10 +403,7 @@ async def test_translation_response_ignores_source_lines_and_extra_fields() -> N
         original_lines=["こんにちは"],
     )
     item.build_placeholders(text_rules)
-    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
-    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
-
-    await verify_translation_batch(
+    verification = _verify_result(
         ai_result=_build_model_response(
             item=item,
             source_lines=["模型改写的原文"],
@@ -412,15 +411,11 @@ async def test_translation_response_ignores_source_lines_and_extra_fields() -> N
             extra_fields={"type": "wrong", "unused": ["ignored"]},
         ),
         items=[item],
-        right_queue=right_queue,
-        error_queue=error_queue,
         text_rules=text_rules,
     )
 
-    assert error_queue.empty()
-    result = await right_queue.get()
-    assert result is not None
-    assert result[0].translation_lines == ["你好"]
+    assert not verification.error_items
+    assert verification.right_items[0].translation_lines == ["你好"]
 
 
 @pytest.mark.asyncio
@@ -459,8 +454,8 @@ async def test_long_text_whitespace_cleanup_preserves_generated_quote_indent() -
 
 
 @pytest.mark.asyncio
-async def test_translation_response_missing_id_is_recorded_as_missing_key() -> None:
-    """未知 ID 被忽略后，本地未返回条目仍按漏翻处理。"""
+async def test_translation_response_unknown_id_blocks_batch_as_protocol_error() -> None:
+    """未知短 ID 必须作为明确协议错误阻止整批保存。"""
     text_rules = _build_text_rules(width_limit=40)
     item = TranslationItem(
         location_path="Map001.json/1/0/0",
@@ -468,12 +463,10 @@ async def test_translation_response_missing_id_is_recorded_as_missing_key() -> N
         original_lines=["こんにちは"],
     )
     item.build_placeholders(text_rules)
-    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
-    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
     ai_result = json.dumps(
         [
             {
-                "id": "Map999.json/1/0/0",
+                "id": "T999999",
                 "role": "",
                 "source_lines": ["こんにちは"],
                 "translation_lines": ["你好"],
@@ -482,18 +475,16 @@ async def test_translation_response_missing_id_is_recorded_as_missing_key() -> N
         ensure_ascii=False,
     )
 
-    await verify_translation_batch(
+    verification = _verify_result(
         ai_result=ai_result,
         items=[item],
-        right_queue=right_queue,
-        error_queue=error_queue,
         text_rules=text_rules,
     )
 
-    assert right_queue.empty()
-    error_items = await error_queue.get()
-    assert error_items is not None
-    assert error_items[0].error_type == "AI漏翻"
+    assert not verification.right_items
+    error_items = verification.error_items
+    assert error_items[0].error_type == "模型返回不可解析"
+    assert "response_unknown_id" in "\n".join(error_items[0].error_detail)
 
 
 @pytest.mark.parametrize(
@@ -518,20 +509,14 @@ async def test_empty_translation_lines_are_recorded_as_missing_translation(
         original_lines=original_lines,
     )
     item.build_placeholders(text_rules)
-    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
-    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
-
-    await verify_translation_batch(
+    verification = _verify_result(
         ai_result=_build_model_response(item=item, translation_lines=translation_lines),
         items=[item],
-        right_queue=right_queue,
-        error_queue=error_queue,
         text_rules=text_rules,
     )
 
-    assert right_queue.empty()
-    error_items = await error_queue.get()
-    assert error_items is not None
+    assert not verification.right_items
+    error_items = verification.error_items
     assert error_items[0].error_type == "AI漏翻"
     assert error_items[0].error_detail == ["AI漏翻: 模型返回空译文"]
 
@@ -547,25 +532,19 @@ async def test_translation_response_duplicate_valid_id_blocks_batch() -> None:
     )
     item.build_placeholders(text_rules)
     response_item = {
-        "id": item.location_path,
+        "id": "T000001",
         "role": "",
         "source_lines": ["こんにちは"],
         "translation_lines": ["你好"],
     }
-    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
-    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
-
-    await verify_translation_batch(
+    verification = _verify_result(
         ai_result=json.dumps([response_item, response_item], ensure_ascii=False),
         items=[item],
-        right_queue=right_queue,
-        error_queue=error_queue,
         text_rules=text_rules,
     )
 
-    assert right_queue.empty()
-    error_items = await error_queue.get()
-    assert error_items is not None
+    assert not verification.right_items
+    error_items = verification.error_items
     assert error_items[0].error_type == "模型返回不可解析"
 
 
@@ -579,20 +558,14 @@ async def test_array_response_line_count_mismatch_is_recorded() -> None:
         original_lines=["はい", "いいえ"],
     )
     item.build_placeholders(text_rules)
-    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
-    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
-
-    await verify_translation_batch(
+    verification = _verify_result(
         ai_result=_build_model_response(item=item, translation_lines=["是"]),
         items=[item],
-        right_queue=right_queue,
-        error_queue=error_queue,
         text_rules=text_rules,
     )
 
-    assert right_queue.empty()
-    error_items = await error_queue.get()
-    assert error_items is not None
+    assert not verification.right_items
+    error_items = verification.error_items
     assert error_items[0].error_type == "选项行数不匹配"
 
 
@@ -659,20 +632,14 @@ async def test_invalid_model_response_is_recorded_on_error_items() -> None:
         original_lines=["あ"],
     )
     raw_response = "无法解析的模型输出"
-    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
-    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
-
-    await verify_translation_batch(
+    verification = _verify_result(
         ai_result=raw_response,
         items=[item],
-        right_queue=right_queue,
-        error_queue=error_queue,
         text_rules=_build_text_rules(width_limit=47),
     )
 
-    assert right_queue.empty()
-    error_items = await error_queue.get()
-    assert error_items is not None
+    assert not verification.right_items
+    error_items = verification.error_items
     assert error_items[0].model_response == raw_response
 
 
@@ -969,7 +936,11 @@ def test_inner_book_title_quote_converted_to_straight_quotes_is_restored() -> No
         (["『リコ銀行』"], ["《莉可银行》"], ["『莉可银行』"]),
         (["『リコ銀行』"], ["「莉可银行」"], ["『莉可银行』"]),
         (["これが『秒殺テク」……！"], ["这就是‘秒杀技术’……！"], ["这就是『秒杀技术」……！"]),
-        (["患者は「声が見える」「主が近い」と報告。"], ["患者说“能看到声音”“主就在身边”。"], ["患者说「能看到声音」「主就在身边」。"]),
+        (
+            ["患者は「声が見える」「主が近い」と報告。"],
+            ["患者说“能看到声音”“主就在身边”。"],
+            ["患者说「能看到声音」「主就在身边」。"],
+        ),
         (["「リア」と刺繍がある"], ["所谓“记录”，上面绣着“莉亚”。"], ["所谓「记录」，上面绣着“莉亚”。"]),
         (["「声」「主」"], ["“声音”“主人”“额外强调”"], ["「声音」「主人」“额外强调”"]),
         (["「声」「主」"], ["“声音”“主人”还有未闭合的“额外"], ["「声音」「主人」还有未闭合的“额外"]),
@@ -1053,24 +1024,17 @@ async def test_short_text_inner_book_title_quote_converted_to_curly_quote_is_res
         original_lines=[original_text],
     )
     item.build_placeholders(text_rules)
-    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
-    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
-
-    await verify_translation_batch(
+    verification = _verify_result(
         ai_result=_build_model_response(
             item=item,
             translation_lines=[translated_text],
         ),
         items=[item],
-        right_queue=right_queue,
-        error_queue=error_queue,
         text_rules=text_rules,
     )
 
-    assert error_queue.empty()
-    result = await right_queue.get()
-    assert result is not None
-    assert result[0].translation_lines == [
+    assert not verification.error_items
+    assert verification.right_items[0].translation_lines == [
         (
             r"\C[2]事件完成"
             "\n\n"

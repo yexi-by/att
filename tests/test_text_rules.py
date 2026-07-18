@@ -11,18 +11,43 @@ from app.config.custom_placeholder_rules import (
     load_custom_placeholder_rules_text,
 )
 from app.config.schemas import TextRulesSetting
-from app.language_profiles import build_text_rules_setting_for_language_profile
+from app.language_profiles import (
+    apply_language_profile_to_raw_config,
+    build_text_rules_setting_for_language_profile,
+)
 from app.rmmz.control_codes import (
-    CustomPlaceholderRule,
     LITERAL_ESCAPE_PLACEHOLDERS,
     LITERAL_LINE_BREAK_PLACEHOLDER,
     REAL_LINE_BREAK_PLACEHOLDER,
+    CustomPlaceholderRule,
     StructuredPlaceholderRule,
 )
 from app.rmmz.schema import SourceResidualRuleRecord, TranslationItem
 from app.rmmz.text_rules import TextRules, get_default_text_rules
 from app.source_residual import SourceResidualRuleSet, check_source_residual_for_item
 from app.translation.text_structure import validate_translation_text_structure
+
+
+def test_mixed_japanese_english_profile_detects_visible_ui_and_excludes_protocol_noise() -> None:
+    """显式追加英文后识别英文 UI，同时保留英文资源路径和脚本噪声排除。"""
+    raw_config: dict[str, object] = {}
+    apply_language_profile_to_raw_config(
+        raw_config=raw_config,
+        source_language="ja",
+        additional_source_languages=("en",),
+    )
+    raw_text_rules = raw_config.get("text_rules")
+    assert isinstance(raw_text_rules, dict)
+    rules = TextRules.from_setting(TextRulesSetting.model_validate(raw_text_rules))
+
+    assert rules.should_translate_source_text("SOLD OUT") is True
+    assert rules.should_translate_source_text("売り切れ") is True
+    assert rules.should_translate_source_text("img/pictures/SOLD_OUT.png") is False
+    assert rules.should_translate_source_text("this.showSoldOut()") is False
+    assert rules.should_translate_source_text("undefined") is False
+
+    japanese_only = TextRules.from_setting(build_text_rules_setting_for_language_profile("ja"))
+    assert japanese_only.should_translate_source_text("SOLD OUT") is False
 
 
 def test_text_rules_replace_and_restore_standard_rmmz_control_sequences() -> None:
@@ -52,7 +77,7 @@ def test_text_rules_replace_and_restore_standard_rmmz_control_sequences() -> Non
         "\\n",
         "\\r",
         "\\t",
-        "\\\"",
+        '\\"',
         "\\'",
         "\\/",
         "\\?",
@@ -89,7 +114,7 @@ def test_text_rules_replace_and_restore_standard_rmmz_control_sequences() -> Non
         LITERAL_LINE_BREAK_PLACEHOLDER,
         LITERAL_ESCAPE_PLACEHOLDERS["\\r"],
         LITERAL_ESCAPE_PLACEHOLDERS["\\t"],
-        LITERAL_ESCAPE_PLACEHOLDERS["\\\""],
+        LITERAL_ESCAPE_PLACEHOLDERS['\\"'],
         LITERAL_ESCAPE_PLACEHOLDERS["\\'"],
         LITERAL_ESCAPE_PLACEHOLDERS["\\/"],
         LITERAL_ESCAPE_PLACEHOLDERS["\\?"],
@@ -336,15 +361,9 @@ def test_structural_source_residual_rule_only_masks_protocol_terms() -> None:
         original_lines=["なまえ:こんにちは"],
         translation_lines=["なまえ:你好"],
     )
-    leaked_visible_item = protocol_only_item.model_copy(
-        update={"translation_lines": ["なまえ:こんにちは"]}
-    )
-    leaked_allowed_term_in_visible_item = protocol_only_item.model_copy(
-        update={"translation_lines": ["なまえ:なまえ"]}
-    )
-    empty_visible_group_item = protocol_only_item.model_copy(
-        update={"translation_lines": ["なまえ:"]}
-    )
+    leaked_visible_item = protocol_only_item.model_copy(update={"translation_lines": ["なまえ:こんにちは"]})
+    leaked_allowed_term_in_visible_item = protocol_only_item.model_copy(update={"translation_lines": ["なまえ:なまえ"]})
+    empty_visible_group_item = protocol_only_item.model_copy(update={"translation_lines": ["なまえ:"]})
 
     check_source_residual_for_item(
         item=protocol_only_item,
@@ -400,9 +419,7 @@ def test_structural_source_residual_rule_respects_ignore_case() -> None:
         original_lines=["LABEL:Hello"],
         translation_lines=["label:你好"],
     )
-    leaked_visible_item = protocol_only_item.model_copy(
-        update={"translation_lines": ["label:label"]}
-    )
+    leaked_visible_item = protocol_only_item.model_copy(update={"translation_lines": ["label:label"]})
 
     check_source_residual_for_item(
         item=protocol_only_item,
@@ -516,9 +533,7 @@ def test_text_rules_can_apply_custom_placeholder_json_rules() -> None:
         "こんにちは[CUSTOM_AT_VARIABLE_1][CUSTOM_INLINE_TAG_2][RMMZ_VARIABLE_2]"
     ]
 
-    item.translation_lines_with_placeholders = [
-        "你好[CUSTOM_AT_VARIABLE_1][CUSTOM_INLINE_TAG_2][RMMZ_VARIABLE_2]"
-    ]
+    item.translation_lines_with_placeholders = ["你好[CUSTOM_AT_VARIABLE_1][CUSTOM_INLINE_TAG_2][RMMZ_VARIABLE_2]"]
     item.verify_placeholders(rules)
     item.restore_placeholders()
     assert item.translation_lines == ["你好@V[1]<tag:abc>\\V[2]"]
@@ -526,13 +541,11 @@ def test_text_rules_can_apply_custom_placeholder_json_rules() -> None:
     assert rules.is_line_width_counted_char("@")
 
 
-def test_custom_prefix_control_keeps_adjacent_dialogue_translatable() -> None:
-    """无参数插件控制符可以只保护前缀，后面紧贴的正文继续交给模型。"""
+def test_custom_prefix_control_does_not_claim_complete_candidate_coverage() -> None:
+    """普通规则只保护紧贴正文的前缀时，不能把整个长候选标成已覆盖。"""
     rules = TextRules.from_setting(
         TextRulesSetting(),
-        custom_placeholder_rules=(
-            CustomPlaceholderRule.create(r"\\Shake", "[CUSTOM_PLUGIN_SHAKE_MARKER_{index}]"),
-        ),
+        custom_placeholder_rules=(CustomPlaceholderRule.create(r"\\Shake", "[CUSTOM_PLUGIN_SHAKE_MARKER_{index}]"),),
     )
     item = TranslationItem(
         location_path="CommonEvents.json/1/0",
@@ -542,11 +555,10 @@ def test_custom_prefix_control_keeps_adjacent_dialogue_translatable() -> None:
 
     item.build_placeholders(rules)
     assert item.original_lines_with_placeholders == ["[CUSTOM_PLUGIN_SHAKE_MARKER_1]Stop this!!!"]
-
-    item.translation_lines_with_placeholders = ["[CUSTOM_PLUGIN_SHAKE_MARKER_1]住手！！！"]
-    item.verify_placeholders(rules)
-    item.restore_placeholders()
-    assert item.translation_lines == [r"\Shake住手！！！"]
+    coverages = rules.iter_control_sequence_candidate_coverages(item.original_lines[0])
+    assert len(coverages) == 1
+    assert coverages[0].candidate.original == r"\ShakeStop"
+    assert coverages[0].coverage_kind == "uncovered"
 
 
 def test_structured_placeholder_rule_keeps_shell_and_translates_inner_text() -> None:
@@ -572,13 +584,9 @@ def test_structured_placeholder_rule_keeps_shell_and_translates_inner_text() -> 
     )
 
     item.build_placeholders(rules)
-    assert item.original_lines_with_placeholders == [
-        "[CUSTOM_MINI_LABEL_OPEN_1]Alraune[CUSTOM_MINI_LABEL_CLOSE_1]"
-    ]
+    assert item.original_lines_with_placeholders == ["[CUSTOM_MINI_LABEL_OPEN_1]Alraune[CUSTOM_MINI_LABEL_CLOSE_1]"]
 
-    item.translation_lines_with_placeholders = [
-        "[CUSTOM_MINI_LABEL_OPEN_1]阿尔劳娜[CUSTOM_MINI_LABEL_CLOSE_1]"
-    ]
+    item.translation_lines_with_placeholders = ["[CUSTOM_MINI_LABEL_OPEN_1]阿尔劳娜[CUSTOM_MINI_LABEL_CLOSE_1]"]
     item.verify_placeholders(rules)
     item.restore_placeholders()
     assert item.translation_lines == ["<Mini Label: 阿尔劳娜>"]
@@ -664,9 +672,7 @@ def test_structured_placeholder_rule_rejects_normal_rule_overlap() -> None:
     )
     rules = TextRules.from_setting(
         TextRulesSetting(),
-        custom_placeholder_rules=(
-            CustomPlaceholderRule.create(r">", "[CUSTOM_RAW_CLOSE_{index}]"),
-        ),
+        custom_placeholder_rules=(CustomPlaceholderRule.create(r">", "[CUSTOM_RAW_CLOSE_{index}]"),),
         structured_placeholder_rules=(structured_rule,),
     )
     item = TranslationItem(
@@ -693,9 +699,7 @@ def test_structured_placeholder_rule_rejects_translatable_group_overlap() -> Non
     )
     rules = TextRules.from_setting(
         TextRulesSetting(),
-        custom_placeholder_rules=(
-            CustomPlaceholderRule.create(r"Alraune", "[CUSTOM_NAME_{index}]"),
-        ),
+        custom_placeholder_rules=(CustomPlaceholderRule.create(r"Alraune", "[CUSTOM_NAME_{index}]"),),
         structured_placeholder_rules=(structured_rule,),
     )
     item = TranslationItem(
@@ -741,6 +745,73 @@ def test_structured_placeholder_rule_allows_standard_control_in_translatable_gro
     item.verify_placeholders(rules)
     item.restore_placeholders()
     assert item.translation_lines == [r"D_TEXT \c[17]狂按决定键！ 48"]
+
+
+def test_mv_nw_structured_shell_and_dynamic_name_rules_roundtrip() -> None:
+    """报告中的字面名字框、动态角色名和相邻控制符都必须完整往返。"""
+    structured_rule = StructuredPlaceholderRule.create(
+        rule_name="MV_NW",
+        rule_type="paired_shell",
+        pattern_text=r"(?P<open>\\NW\[)(?P<text>[^\\\]\r\n]+?)(?P<close>\])",
+        translatable_group="text",
+        protected_groups={
+            "open": "[CUSTOM_MV_NW_OPEN_{index}]",
+            "close": "[CUSTOM_MV_NW_CLOSE_{index}]",
+        },
+    )
+    rules = TextRules.from_setting(
+        TextRulesSetting(),
+        custom_placeholder_rules=(
+            CustomPlaceholderRule.create(
+                r"\\NW\[\\N\[\d+\]\]",
+                "[CUSTOM_DYNAMIC_NW_MARKER_{index}]",
+            ),
+            CustomPlaceholderRule.create(
+                r"\\SV\[[^\]\r\n]+\]",
+                "[CUSTOM_PLUGIN_SV_MARKER_{index}]",
+            ),
+        ),
+        structured_placeholder_rules=(structured_rule,),
+    )
+    expectations = {
+        r"\NW[神父]": "[CUSTOM_MV_NW_OPEN_1]神父[CUSTOM_MV_NW_CLOSE_1]",
+        r"\NW[\N[1]]": "[CUSTOM_DYNAMIC_NW_MARKER_1]",
+        r"\NW[神父]\SV[A0001]": ("[CUSTOM_MV_NW_OPEN_1]神父[CUSTOM_MV_NW_CLOSE_1][CUSTOM_PLUGIN_SV_MARKER_2]"),
+    }
+
+    for original, model_text in expectations.items():
+        item = TranslationItem(
+            location_path="CommonEvents.json/1/0",
+            item_type="short_text",
+            original_lines=[original],
+        )
+        item.build_placeholders(rules)
+        assert item.original_lines_with_placeholders == [model_text]
+        item.translation_lines_with_placeholders = [model_text]
+        item.verify_placeholders(rules)
+        item.restore_placeholders()
+        assert item.translation_lines == [original]
+
+
+def test_structured_placeholder_rule_rejects_unclassified_match_gaps() -> None:
+    """paired_shell 的完整命中不能含有未归属保护或可翻译分组的缺口。"""
+    structured_rule = StructuredPlaceholderRule.create(
+        rule_name="BROKEN_NW",
+        rule_type="paired_shell",
+        pattern_text=r"PREFIX(?P<open>\\NW\[)(?P<text>[^\]\r\n]+)(?P<close>\])",
+        translatable_group="text",
+        protected_groups={
+            "open": "[CUSTOM_BROKEN_NW_OPEN_{index}]",
+            "close": "[CUSTOM_BROKEN_NW_CLOSE_{index}]",
+        },
+    )
+    rules = TextRules.from_setting(
+        TextRulesSetting(),
+        structured_placeholder_rules=(structured_rule,),
+    )
+
+    with pytest.raises(ValueError, match="没有完整覆盖"):
+        _ = rules.iter_control_sequence_spans(r"PREFIX\NW[神父]")
 
 
 def test_unprotected_control_sequences_must_stay_exact() -> None:
@@ -817,13 +888,9 @@ def test_real_line_break_placeholder_roundtrips_short_text() -> None:
     )
 
     item.build_placeholders(rules)
-    assert item.original_lines_with_placeholders == [
-        f"説明{REAL_LINE_BREAK_PLACEHOLDER}本文"
-    ]
+    assert item.original_lines_with_placeholders == [f"説明{REAL_LINE_BREAK_PLACEHOLDER}本文"]
 
-    item.translation_lines_with_placeholders = [
-        f"说明{REAL_LINE_BREAK_PLACEHOLDER}正文"
-    ]
+    item.translation_lines_with_placeholders = [f"说明{REAL_LINE_BREAK_PLACEHOLDER}正文"]
     item.verify_placeholders(rules)
     item.restore_placeholders()
     assert item.translation_lines == ["说明\n正文"]
@@ -876,9 +943,7 @@ def test_custom_placeholder_rules_do_not_expose_app_home_loader() -> None:
 
 def test_custom_placeholder_rules_load_from_cli_json_string() -> None:
     """CLI JSON 字符串会作为本次运行的规则来源。"""
-    custom_rules = load_custom_placeholder_rules_text(
-        json.dumps({r"\\F\[[^\]]+\]": "[CUSTOM_FACE_PORTRAIT_{index}]"})
-    )
+    custom_rules = load_custom_placeholder_rules_text(json.dumps({r"\\F\[[^\]]+\]": "[CUSTOM_FACE_PORTRAIT_{index}]"}))
     rules = TextRules.from_setting(
         TextRulesSetting(),
         custom_placeholder_rules=custom_rules,

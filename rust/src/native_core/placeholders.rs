@@ -201,6 +201,44 @@ pub(crate) fn verify_placeholders(
     }
 }
 
+/// 检查占位符是否一致，但不构造面向报告的错误明细。
+pub(crate) fn placeholders_match(
+    item: &NativeTranslationItem,
+    rules: &CompiledRules,
+    placeholder_build: &PlaceholderBuild,
+    translation_lines_with_placeholders: &[String],
+) -> Result<bool, String> {
+    let original_placeholders =
+        collect_placeholder_tokens(&placeholder_build.original_lines_with_placeholders);
+    let translated_placeholders = collect_placeholder_tokens(translation_lines_with_placeholders);
+    if translated_placeholders
+        .difference(&original_placeholders)
+        .next()
+        .is_some()
+    {
+        return Ok(false);
+    }
+
+    if !placeholder_build.placeholder_map.is_empty() {
+        let combined_text = translation_lines_with_placeholders.join("").to_lowercase();
+        for (placeholder, expected_count) in &placeholder_build.placeholder_counts {
+            let actual_count = combined_text.matches(&placeholder.to_lowercase()).count();
+            if placeholder.eq_ignore_ascii_case(LITERAL_LINE_BREAK_PLACEHOLDER) {
+                if actual_count < *expected_count {
+                    return Ok(false);
+                }
+            } else if actual_count != *expected_count {
+                return Ok(false);
+            }
+        }
+    }
+
+    let original_raw_controls = collect_unprotected_control_sequences(&item.original_lines, rules)?;
+    let translated_raw_controls =
+        collect_unprotected_control_sequences(translation_lines_with_placeholders, rules)?;
+    Ok(original_raw_controls == translated_raw_controls)
+}
+
 pub(crate) fn collect_placeholder_tokens(lines: &[String]) -> HashSet<String> {
     let mut tokens = HashSet::new();
     for line in lines {

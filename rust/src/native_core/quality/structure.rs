@@ -9,36 +9,122 @@ use super::super::details::base_detail;
 use super::super::models::{CompiledRules, NativeTranslationItem};
 use super::super::placeholders::{
     LITERAL_LINE_BREAK_MARKER, LITERAL_LINE_BREAK_PLACEHOLDER, REAL_LINE_BREAK_PLACEHOLDER,
-    build_placeholders, mask_translation_controls,
 };
+use super::PreparedControlState;
 
 /// 收集单条译文的文本结构问题明细。
 pub(super) fn collect_text_structure_detail(
     item: &NativeTranslationItem,
     rules: &CompiledRules,
+    prepared: &Result<PreparedControlState, String>,
 ) -> Option<Value> {
-    match build_placeholders(item, rules).and_then(|placeholder_build| {
-        let translation_lines_with_placeholders =
-            mask_translation_controls(item, rules, &placeholder_build)?;
-        collect_text_structure_errors(
+    match prepared {
+        Ok(prepared) => match collect_text_structure_errors(
             item,
             rules,
             &item.translation_lines,
-            &translation_lines_with_placeholders,
-            &placeholder_build.original_lines_with_placeholders,
-        )
-    }) {
-        Ok(errors) if errors.is_empty() => None,
-        Ok(errors) => {
-            let mut detail = base_detail(item);
-            detail.insert("reason".to_string(), json!(errors.join(";\n")));
-            Some(Value::Object(detail))
-        }
+            &prepared.translation_lines_with_placeholders,
+            &prepared.placeholder_build.original_lines_with_placeholders,
+        ) {
+            Ok(errors) if errors.is_empty() => None,
+            Ok(errors) => {
+                let mut detail = base_detail(item);
+                detail.insert("reason".to_string(), json!(errors.join(";\n")));
+                Some(Value::Object(detail))
+            }
+            Err(reason) => {
+                let mut detail = base_detail(item);
+                detail.insert("reason".to_string(), json!(reason));
+                Some(Value::Object(detail))
+            }
+        },
         Err(reason) => {
             let mut detail = base_detail(item);
             detail.insert("reason".to_string(), json!(reason));
             Some(Value::Object(detail))
         }
+    }
+}
+
+/// 判断单条译文是否存在结构问题，不构造报告明细。
+pub(super) fn has_text_structure_issue(
+    item: &NativeTranslationItem,
+    rules: &CompiledRules,
+    prepared: &Result<PreparedControlState, String>,
+) -> bool {
+    let Ok(prepared) = prepared else {
+        return true;
+    };
+    if has_artifact_error(item, &item.translation_lines, rules) {
+        return true;
+    }
+    if item.item_type != "short_text" {
+        return false;
+    }
+    if item.translation_lines.len() != 1 {
+        return true;
+    }
+    count_real_line_breaks(&prepared.placeholder_build.original_lines_with_placeholders)
+        != count_real_line_breaks(&prepared.translation_lines_with_placeholders)
+        || count_literal_line_breaks(&prepared.placeholder_build.original_lines_with_placeholders)
+            != count_literal_line_breaks(&prepared.translation_lines_with_placeholders)
+}
+
+fn has_artifact_error(
+    item: &NativeTranslationItem,
+    translation_lines: &[String],
+    rules: &CompiledRules,
+) -> bool {
+    let joined_text = translation_lines.join("\n");
+    if !item.location_path.is_empty() && joined_text.contains(&item.location_path) {
+        return true;
+    }
+    if translation_lines.iter().any(|line| {
+        let stripped = line.trim();
+        let lowered = stripped.to_lowercase();
+        stripped.starts_with("译文：")
+            || stripped.starts_with("译文:")
+            || stripped.starts_with("翻译：")
+            || stripped.starts_with("翻译:")
+            || stripped.contains("以下是翻译")
+            || lowered.starts_with("id:")
+            || lowered.starts_with("id：")
+            || lowered.starts_with("\"id\":")
+            || lowered.starts_with("source_lines:")
+            || lowered.starts_with("source_lines：")
+            || lowered.starts_with("\"source_lines\":")
+            || lowered.starts_with("translation_lines:")
+            || lowered.starts_with("translation_lines：")
+            || lowered.starts_with("\"translation_lines\":")
+    }) {
+        return true;
+    }
+    if item.item_type != "long_text" {
+        return false;
+    }
+    let original_empty_count = item
+        .original_lines
+        .iter()
+        .filter(|line| line.trim().is_empty())
+        .count();
+    let translation_empty_count = translation_lines
+        .iter()
+        .filter(|line| line.trim().is_empty())
+        .count();
+    if translation_empty_count > 0
+        && (original_empty_count == 0 || translation_empty_count > original_empty_count)
+    {
+        return true;
+    }
+    if translation_lines
+        .iter()
+        .any(|line| has_suspicious_n_prefix(line))
+    {
+        return true;
+    }
+    match collect_unexpected_escape_fragments(translation_lines, rules) {
+        Ok(fragments) => !fragments.is_empty(),
+        Err(_) => true,
     }
 }
 

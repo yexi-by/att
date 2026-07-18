@@ -8,8 +8,7 @@ from app.rmmz.mv_namebox import (
     parse_mv_virtual_speaker_line,
     runtime_mv_virtual_namebox_rules,
 )
-from app.rmmz.schema import Code, GameData
-from app.rmmz.schema import MvVirtualNameboxRuleRecord
+from app.rmmz.schema import Code, GameData, MvVirtualNameboxRuleRecord
 from app.rmmz.text_rules import TextRules, get_default_text_rules
 
 from .schemas import (

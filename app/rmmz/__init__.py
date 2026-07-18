@@ -4,8 +4,8 @@ from .extraction import DataTextExtraction
 from .game_file_view import GameFileView, parse_game_file_view
 from .loader import (
     GameDataManager,
-    load_active_runtime_game_data,
     load_active_game_data,
+    load_active_runtime_game_data,
     load_game_data,
     load_game_data_for_view,
     load_translation_source_game_data,

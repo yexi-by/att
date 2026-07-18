@@ -1,0 +1,85 @@
+name: release preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "要验证的完整 40 位 commit SHA；不需要也不会创建 tag"
+        required: true
+        type: string
+      upload_artifacts:
+        description: "上传已通过验证的预检产物"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  verify-commit:
+    name: Verify untagged commit release artifacts
+    runs-on: windows-2025
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+
+      - name: Verify preflight commit identity
+        id: meta
+        shell: pwsh
+        env:
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+        run: |
+          $requested = $env:REQUESTED_SHA.Trim().ToLowerInvariant()
+          if ($requested -notmatch '^[0-9a-f]{40}$') {
+            throw "release preflight 只接受完整 40 位 commit SHA：$env:REQUESTED_SHA"
+          }
+          $resolved = (git rev-parse "$requested^{commit}").Trim().ToLowerInvariant()
+          $head = (git rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($resolved -cne $requested -or $head -cne $requested) {
+            throw "预检 SHA 不一致：requested=$requested resolved=$resolved HEAD=$head"
+          }
+          "sha=$head" >> $env:GITHUB_OUTPUT
+          "short_sha=$($head.Substring(0, 12))" >> $env:GITHUB_OUTPUT
+          "version=0.1.15" >> $env:GITHUB_OUTPUT
+          "zip_name=att-mz-windows-x86_64.zip" >> $env:GITHUB_OUTPUT
+
+      - name: Set up locked uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.28"
+          enable-cache: true
+
+      - name: Set up locked Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: "1.97.0"
+          components: rustfmt, clippy
+
+      - name: Run shared release verification without a tag
+        shell: pwsh
+        env:
+          RELEASE_TAG: ""
+        run: >-
+          & .\scripts\run_release_verification.ps1
+          -ExpectedVersion "${{ steps.meta.outputs.version }}"
+          -ZipName "${{ steps.meta.outputs.zip_name }}"
+
+      - name: Upload verified preflight artifacts
+        if: ${{ inputs.upload_artifacts }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: att-mz-preflight-${{ steps.meta.outputs.short_sha }}-windows-x86_64
+          path: |
+            dist-a/${{ steps.meta.outputs.zip_name }}
+            dist-a/SHA256SUMS.txt
+            dist-a/pylock.windows-x86_64.toml
+            dist-a/release-manifest.json
+          if-no-files-found: error
+          retention-days: 7

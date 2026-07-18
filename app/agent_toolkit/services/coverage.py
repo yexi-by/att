@@ -6,7 +6,6 @@ from .common import (
     AgentReport,
     AgentServiceContext,
     TextRules,
-    TextScopeService,
     _build_coverage_report,
     _text_scope_blocking_errors,
     load_setting,
@@ -24,7 +23,11 @@ class CoverageAgentMixin:
     ) -> AgentReport:
         """输出当前游戏统一文本清单。"""
         async with await self.game_registry.open_game(game_title) as session:
-            setting = load_setting(self.setting_path, source_language=session.source_language)
+            setting = load_setting(
+                self.setting_path,
+                source_language=session.source_language,
+                additional_source_languages=session.additional_source_languages,
+            )
             custom_rules = await self._resolve_custom_rules(
                 session=session,
                 custom_placeholder_rules_text=None,
@@ -37,19 +40,16 @@ class CoverageAgentMixin:
             )
             game_data = await self._load_translation_source_game_data(session)
             translated_items = await session.read_translated_items()
-            scope = await TextScopeService().build(
+            analysis_context = await self._build_game_analysis_context(
                 session=session,
                 game_data=game_data,
                 text_rules=text_rules,
                 translated_items=translated_items,
                 include_write_probe=include_write_probe,
             )
+            scope = analysis_context.scope
         translated_paths = {item.location_path for item in translated_items}
-        inactive_entries = [
-            entry
-            for entry in scope.entries
-            if not entry.enters_translation
-        ]
+        inactive_entries = [entry for entry in scope.entries if not entry.enters_translation]
         unwritable_entries = scope.unwritable_entries
         errors = _text_scope_blocking_errors(scope)
         return AgentReport.from_parts(
@@ -83,7 +83,11 @@ class CoverageAgentMixin:
     ) -> AgentReport:
         """审计规则命中、文本清单、已保存译文和写入范围是否一致。"""
         async with await self.game_registry.open_game(game_title) as session:
-            setting = load_setting(self.setting_path, source_language=session.source_language)
+            setting = load_setting(
+                self.setting_path,
+                source_language=session.source_language,
+                additional_source_languages=session.additional_source_languages,
+            )
             custom_rules = await self._resolve_custom_rules(
                 session=session,
                 custom_placeholder_rules_text=None,
@@ -96,13 +100,14 @@ class CoverageAgentMixin:
             )
             game_data = await self._load_translation_source_game_data(session)
             translated_items = await session.read_translated_items()
-            scope = await TextScopeService().build(
+            analysis_context = await self._build_game_analysis_context(
                 session=session,
                 game_data=game_data,
                 text_rules=text_rules,
                 translated_items=translated_items,
                 include_write_probe=include_write_probe,
             )
+            scope = analysis_context.scope
         return _build_coverage_report(
             scope=scope,
             translated_items=translated_items,

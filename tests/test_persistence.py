@@ -7,10 +7,8 @@ from typing import cast
 
 import pytest
 
-from app.terminology import TerminologyGlossary, TerminologyRegistry
-from app.persistence import GameRegistry
+from app.persistence import GameRegistrationConflictError, GameRegistry
 from app.persistence.sql import CURRENT_SCHEMA_VERSION, EXPECTED_STATIC_TABLE_NAMES
-from app.rule_review import PLUGIN_TEXT_RULE_DOMAIN
 from app.rmmz.schema import (
     EventCommandParameterFilter,
     EventCommandTextRuleRecord,
@@ -26,6 +24,8 @@ from app.rmmz.schema import (
     TranslationItem,
 )
 from app.rmmz.text_rules import JsonValue, ensure_json_object
+from app.rule_review import PLUGIN_TEXT_RULE_DOMAIN
+from app.terminology import TerminologyGlossary, TerminologyRegistry
 
 
 def read_sqlite_table_names(db_path: Path) -> set[str]:
@@ -116,7 +116,7 @@ async def test_registry_and_target_session_use_injected_directory(minimal_game_d
     assert record.target_language == "zh-Hans"
     assert [item.game_title for item in await registry.list_games()] == ["テストゲーム"]
 
-    async with await registry.open_game("テストゲーム") as session:
+    async with await registry.open_game_with_mutation_lease("テストゲーム") as session:
         assert session.source_language == "ja"
         assert session.target_language == "zh-Hans"
         await session.write_translation_items(
@@ -147,9 +147,7 @@ async def test_registry_and_target_session_use_injected_directory(minimal_game_d
             ],
         )
         translated_long_item = next(
-            item
-            for item in await session.read_translated_items()
-            if item.location_path == "CommonEvents.json/1/0"
+            item for item in await session.read_translated_items() if item.location_path == "CommonEvents.json/1/0"
         )
         assert translated_long_item.source_line_paths == ["CommonEvents.json/1/1"]
         await session.write_translation_items(
@@ -168,9 +166,7 @@ async def test_registry_and_target_session_use_injected_directory(minimal_game_d
             {"System.json/gameTitle"},
         )
         assert deleted_count == 2
-        assert await session.read_translation_location_paths() == {
-            "System.json/gameTitle"
-        }
+        assert await session.read_translation_location_paths() == {"System.json/gameTitle"}
         assert session.engine_kind == "mz"
         assert session.content_root == minimal_game_dir
 
@@ -324,24 +320,34 @@ async def test_registry_and_target_session_use_injected_directory(minimal_game_d
                 }
             )
         )
-        quality_errors_after_progress_update = await session.read_translation_quality_errors(
-            run_record.run_id
-        )
+        quality_errors_after_progress_update = await session.read_translation_quality_errors(run_record.run_id)
         assert quality_errors_after_progress_update[0].model_response == "模型原始返回"
 
-        await session.write_llm_failure(
-            LlmFailureRecord(
-                run_id=run_record.run_id,
-                category="rate_limit",
-                error_type="RateLimitError",
-                error_message="请求过于频繁",
-                retryable=True,
-                attempt_count=3,
-                created_at="2026-01-01T00:00:00",
-            )
+        llm_failure = LlmFailureRecord(
+            run_id=run_record.run_id,
+            category="rate_limit",
+            error_type="RateLimitError",
+            error_message="请求过于频繁",
+            retryable=True,
+            attempt_count=3,
+            created_at="2026-01-01T00:00:00",
+        )
+        await session.persist_translation_run_terminal(
+            run_record.model_copy(
+                update={
+                    "status": "failed",
+                    "success_count": 2,
+                    "quality_error_count": 1,
+                    "llm_failure_count": 1,
+                    "finished_at": "2026-01-01T00:00:01",
+                    "stop_reason": "模型请求失败",
+                    "last_error": "llm_request_failed",
+                }
+            ),
+            llm_failure,
         )
         llm_failures = await session.read_llm_failures(run_record.run_id)
-        assert llm_failures[0].category == "rate_limit"
+        assert llm_failures == [llm_failure]
 
 
 @pytest.mark.asyncio
@@ -356,21 +362,47 @@ async def test_register_game_creates_declared_static_table_set(minimal_game_dir:
 
 
 @pytest.mark.asyncio
-async def test_register_game_updates_source_language_setting(
+async def test_register_game_rejects_language_profile_change(
     minimal_english_game_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """重复注册同一游戏时会按本次参数更新源语言设置。"""
+    """重复注册不能静默改变既有游戏的语言配置。"""
     registry = GameRegistry(tmp_path / "db")
 
     english_record = await registry.register_game(minimal_english_game_dir, source_language="en")
-    japanese_record = await registry.register_game(minimal_english_game_dir, source_language="ja")
+    with pytest.raises(GameRegistrationConflictError, match="不同的源语言配置"):
+        _ = await registry.register_game(minimal_english_game_dir, source_language="ja")
 
     assert english_record.source_language == "en"
-    assert japanese_record.source_language == "ja"
     async with await registry.open_game("English Fixture Game") as session:
-        assert session.source_language == "ja"
+        assert session.source_language == "en"
+        assert session.additional_source_languages == ()
         assert session.target_language == "zh-Hans"
+
+
+@pytest.mark.asyncio
+async def test_register_game_persists_stable_id_and_additional_source_language(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """稳定游戏标识和显式追加语言会跨会话保留。"""
+    registry = GameRegistry(tmp_path / "db")
+
+    first_record = await registry.register_game(
+        minimal_game_dir,
+        source_language="ja",
+        additional_source_languages=("en",),
+    )
+    second_record = await registry.register_game(
+        minimal_game_dir,
+        source_language="ja",
+        additional_source_languages=("en",),
+    )
+
+    assert second_record.game_id == first_record.game_id
+    async with await registry.open_game(first_record.game_title) as session:
+        assert session.game_id == first_record.game_id
+        assert session.additional_source_languages == ("en",)
 
 
 @pytest.mark.asyncio
@@ -403,12 +435,12 @@ async def test_register_game_reuses_registered_path_after_active_title_changes(
         json.dumps(system_data, ensure_ascii=False),
         encoding="utf-8",
     )
-    second_record = await registry.register_game(minimal_game_dir, source_language="en")
+    second_record = await registry.register_game(minimal_game_dir, source_language="ja")
 
     assert second_record.db_path == first_record.db_path
     assert second_record.game_title == first_record.game_title
     async with await registry.open_game(first_record.game_title) as session:
-        assert session.source_language == "en"
+        assert session.source_language == "ja"
         assert session.target_language == "zh-Hans"
 
 
@@ -546,7 +578,7 @@ async def test_start_translation_run_clears_previous_quality_errors(minimal_game
     registry = GameRegistry(db_dir)
     record = await registry.register_game(minimal_game_dir, source_language="ja")
 
-    async with await registry.open_game(record.game_title) as session:
+    async with await registry.open_game_with_mutation_lease(record.game_title) as session:
         first_run = await session.start_translation_run(
             total_extracted=10,
             pending_count=4,
@@ -569,6 +601,18 @@ async def test_start_translation_run_clears_previous_quality_errors(minimal_game
             ],
         )
         assert len(await session.read_translation_quality_errors(first_run.run_id)) == 1
+
+        await session.persist_translation_run_terminal(
+            first_run.model_copy(
+                update={
+                    "status": "blocked",
+                    "quality_error_count": 1,
+                    "finished_at": "2026-01-01T00:00:00",
+                    "stop_reason": "上一轮存在检查错误",
+                    "last_error": "quality_errors",
+                }
+            )
+        )
 
         second_run = await session.start_translation_run(
             total_extracted=10,

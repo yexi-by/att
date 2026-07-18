@@ -6,7 +6,6 @@ import re
 from dataclasses import dataclass
 from typing import Literal, Self
 
-
 type PlaceholderSource = Literal["standard", "custom", "structured"]
 
 
@@ -64,13 +63,9 @@ class CustomPlaceholderRule:
             index=1,
         )
         if STANDARD_PLACEHOLDER_PATTERN.fullmatch(preview) is not None:
-            raise ValueError(
-                f"自定义占位符模板不能生成 RMMZ 标准占位符: {placeholder_template}"
-            )
+            raise ValueError(f"自定义占位符模板不能生成 RMMZ 标准占位符: {placeholder_template}")
         if CUSTOM_PLACEHOLDER_PATTERN.fullmatch(preview) is None:
-            raise ValueError(
-                f"自定义占位符模板必须生成形如 [CUSTOM_NAME_1] 的方括号占位符，当前生成: {preview}"
-            )
+            raise ValueError(f"自定义占位符模板必须生成形如 [CUSTOM_NAME_1] 的方括号占位符，当前生成: {preview}")
 
         return cls(
             pattern_text=pattern_text,
@@ -141,13 +136,9 @@ class StructuredPlaceholderRule:
                 index=1,
             )
             if STANDARD_PLACEHOLDER_PATTERN.fullmatch(preview) is not None:
-                raise ValueError(
-                    f"结构化占位符模板不能生成 RMMZ 标准占位符: {placeholder_template}"
-                )
+                raise ValueError(f"结构化占位符模板不能生成 RMMZ 标准占位符: {placeholder_template}")
             if CUSTOM_PLACEHOLDER_PATTERN.fullmatch(preview) is None:
-                raise ValueError(
-                    f"结构化占位符模板必须生成形如 [CUSTOM_NAME_1] 的方括号占位符，当前生成: {preview}"
-                )
+                raise ValueError(f"结构化占位符模板必须生成形如 [CUSTOM_NAME_1] 的方括号占位符，当前生成: {preview}")
             normalized_protected_groups[group_name] = placeholder_template
 
         return cls(
@@ -191,7 +182,7 @@ LITERAL_LINE_BREAK_PLACEHOLDER = "[RMMZ_LITERAL_LINE_BREAK]"
 REAL_LINE_BREAK_MARKER = "\n"
 REAL_LINE_BREAK_PLACEHOLDER = "[RMMZ_REAL_LINE_BREAK]"
 LITERAL_ESCAPE_PLACEHOLDERS: dict[str, str] = {
-    "\\\"": "[RMMZ_LITERAL_DOUBLE_QUOTE]",
+    '\\"': "[RMMZ_LITERAL_DOUBLE_QUOTE]",
     "\\'": "[RMMZ_LITERAL_SINGLE_QUOTE]",
     r"\/": "[RMMZ_LITERAL_SLASH]",
     r"\?": "[RMMZ_LITERAL_QUESTION_MARK]",
@@ -217,23 +208,15 @@ NO_PARAM_STANDARD_CONTROL_PATTERN: re.Pattern[str] = re.compile(
     r"\\(?P<code>G)(?![A-Za-z\[])",
     re.IGNORECASE,
 )
-SYMBOL_STANDARD_CONTROL_PATTERN: re.Pattern[str] = re.compile(
-    r"\\(?P<symbol>[{}\\$.\|!><^])"
-)
-TERMS_PERCENT_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
-    r"%(?P<param>\d+)"
-)
+SYMBOL_STANDARD_CONTROL_PATTERN: re.Pattern[str] = re.compile(r"\\(?P<symbol>[{}\\$.\|!><^])")
+TERMS_PERCENT_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(r"%(?P<param>\d+)")
 LITERAL_ESCAPE_PATTERN: re.Pattern[str] = re.compile(
     "|".join(re.escape(marker) for marker in LITERAL_ESCAPE_PLACEHOLDERS)
 )
 STANDARD_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
     "|".join(
         (
-            (
-                r"\[RMMZ_(?:"
-                + "|".join(re.escape(name) for name in INDEXED_STANDARD_CODE_NAMES.values())
-                + r")_\d+\]"
-            ),
+            (r"\[RMMZ_(?:" + "|".join(re.escape(name) for name in INDEXED_STANDARD_CODE_NAMES.values()) + r")_\d+\]"),
             r"\[RMMZ_MESSAGE_ARGUMENT_\d+\]",
             r"\[RMMZ_LITERAL_(?:UNICODE|HEX|OCTAL)_ESCAPE_[0-9A-F]+\]",
             re.escape(REAL_LINE_BREAK_PLACEHOLDER),
@@ -258,15 +241,10 @@ ALL_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 RAW_BRACKETED_CONTROL_CANDIDATE_PATTERN: re.Pattern[str] = re.compile(
-    r"\\[A-Za-z]+\d*\[[A-Za-z0-9_./:-]{1,32}[^\]\w\s\[\]\\]"
-    + r"|\\[A-Za-z]+\d*\[[^\]\r\n]{0,64}\]"
+    r"\\[A-Za-z]+\d*\[[A-Za-z0-9_./:-]{1,32}[^\]\w\s\[\]\\]" + r"|\\[A-Za-z]+\d*\[[^\]\r\n]{0,64}\]"
 )
-RAW_BARE_CONTROL_CANDIDATE_PATTERN: re.Pattern[str] = re.compile(
-    r"\\(?P<code>[A-Za-z]+)\d*"
-)
-RAW_SYMBOL_CONTROL_CANDIDATE_PATTERN: re.Pattern[str] = re.compile(
-    r"\\[{}\\$.\|!><^]"
-)
+RAW_BARE_CONTROL_CANDIDATE_PATTERN: re.Pattern[str] = re.compile(r"\\(?P<code>[A-Za-z]+)\d*")
+RAW_SYMBOL_CONTROL_CANDIDATE_PATTERN: re.Pattern[str] = re.compile(r"\\[{}\\$.\|!><^]")
 
 
 def iter_standard_control_spans(text: str) -> list[ControlSequenceSpan]:
@@ -368,9 +346,7 @@ def format_placeholder_template(
     try:
         return template.format(code=code, param=param, index=index)
     except (IndexError, KeyError, ValueError) as error:
-        raise ValueError(
-            f"占位符模板格式无效，仅支持 code、param、index 变量: {template}"
-        ) from error
+        raise ValueError(f"占位符模板格式无效，仅支持 code、param、index 变量: {template}") from error
 
 
 def _iter_indexed_standard_control_spans(text: str) -> list[ControlSequenceSpan]:

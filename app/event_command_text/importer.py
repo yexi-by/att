@@ -10,16 +10,15 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 from app.plugin_text.paths import (
     build_json_string_leaf_path_hint,
     expand_rule_to_leaf_paths,
-    resolve_event_command_leaves,
 )
-from app.rmmz.commands import iter_all_commands
-from app.rmmz.game_data import EventCommand
 from app.rmmz.schema import (
     EventCommandParameterFilter,
     EventCommandTextRuleRecord,
     GameData,
 )
 from app.rmmz.text_rules import JsonValue, coerce_json_value
+
+from .index import EventCommandAnalysisEntry, build_event_command_analysis_index
 
 
 class StrictEventCommandRuleModel(BaseModel):
@@ -45,9 +44,7 @@ class EventCommandRuleSpec(StrictEventCommandRuleModel):
 
 
 type EventCommandRuleImportFile = dict[str, list[EventCommandRuleSpec]]
-_EVENT_COMMAND_RULE_IMPORT_ADAPTER: TypeAdapter[EventCommandRuleImportFile] = TypeAdapter(
-    EventCommandRuleImportFile
-)
+_EVENT_COMMAND_RULE_IMPORT_ADAPTER: TypeAdapter[EventCommandRuleImportFile] = TypeAdapter(EventCommandRuleImportFile)
 
 
 async def load_event_command_rule_import_file(input_path: Path) -> EventCommandRuleImportFile:
@@ -71,16 +68,17 @@ def build_event_command_rule_records_from_import(
     *,
     game_data: GameData,
     import_file: EventCommandRuleImportFile,
+    command_index: tuple[EventCommandAnalysisEntry, ...] | None = None,
 ) -> list[EventCommandTextRuleRecord]:
     """把外部事件指令路径映射转换成数据库记录。"""
-    command_snapshots = list(iter_all_commands(game_data))
+    resolved_command_index = build_event_command_analysis_index(game_data) if command_index is None else command_index
     records_by_key: dict[tuple[int, tuple[tuple[int, str], ...]], EventCommandTextRuleRecord] = {}
     for command_code_text, specs in import_file.items():
         command_code = parse_command_code(command_code_text)
         for spec in specs:
             filters = parse_parameter_filters(spec.match)
             record = build_event_command_rule_record(
-                command_snapshots=command_snapshots,
+                command_index=resolved_command_index,
                 command_code=command_code,
                 parameter_filters=filters,
                 path_templates=spec.paths,
@@ -98,30 +96,30 @@ def build_event_command_rule_records_from_import(
 
 def build_event_command_rule_record(
     *,
-    command_snapshots: list[tuple[list[str | int], str, EventCommand]],
+    command_index: tuple[EventCommandAnalysisEntry, ...],
     command_code: int,
     parameter_filters: list[EventCommandParameterFilter],
     path_templates: list[str],
 ) -> EventCommandTextRuleRecord:
     """校验单组事件指令规则并构造数据库记录。"""
-    matched_commands = [
-        command
-        for _path, _display_name, command in command_snapshots
-        if command.code == command_code
+    matched_entries = [
+        entry
+        for entry in command_index
+        if entry.command.code == command_code
         and command_matches_filters(
-            parameters=command.parameters,
+            parameters=entry.command.parameters,
             filters=parameter_filters,
         )
     ]
-    if not matched_commands:
+    if not matched_entries:
         raise ValueError(f"事件指令规则没有命中当前游戏指令: {command_code}")
 
     accepted_paths: list[str] = []
     for path_template in normalize_path_templates(path_templates):
         matched_path_found = False
         hint: str | None = None
-        for command in matched_commands:
-            resolved_leaves = resolve_event_command_leaves(command.parameters)
+        for entry in matched_entries:
+            resolved_leaves = entry.resolved_leaves
             if expand_rule_to_leaf_paths(
                 path_template=path_template,
                 resolved_leaves=resolved_leaves,
@@ -135,9 +133,7 @@ def build_event_command_rule_record(
                 )
         if not matched_path_found:
             hint_suffix = "" if hint is None else f"。{hint}"
-            raise ValueError(
-                f"事件指令 {command_code} 的路径没有命中字符串叶子: {path_template}{hint_suffix}"
-            )
+            raise ValueError(f"事件指令 {command_code} 的路径没有命中字符串叶子: {path_template}{hint_suffix}")
         accepted_paths.append(path_template)
 
     return EventCommandTextRuleRecord(

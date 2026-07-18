@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from importlib import import_module
 from pathlib import Path
-from typing import Protocol, cast
+from typing import cast
 
+from app.native_runtime import invoke_native
 from app.rmmz.schema import (
     FontReplacementRecord,
     PluginSourceRuntimeMappingKind,
@@ -15,23 +14,7 @@ from app.rmmz.schema import (
 )
 from app.rmmz.text_rules import JsonObject
 
-
 type RawJsonObject = dict[str, object]
-
-
-class NativeWritePlanModule(Protocol):
-    """PyO3 扩展暴露的写回计划接口。"""
-
-    def build_write_back_plan(
-        self,
-        game_path: str,
-        db_path: str,
-        setting_payload_json: str,
-        mode: str,
-        confirm_font_overwrite: bool,
-    ) -> str:
-        """构建写回计划并返回 JSON 文本。"""
-        raise NotImplementedError
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,22 +67,22 @@ def build_native_write_back_plan(
     content_output_dir: Path | None = None,
 ) -> NativeWriteBackPlan:
     """调用 Rust 构建写回计划。"""
-    native_module = _load_native_module()
     native_payload = dict(setting_payload or {})
     if content_output_dir is not None:
         native_payload["plan_content_output_dir"] = str(content_output_dir)
-    payload_text = json.dumps(native_payload, ensure_ascii=False, separators=(",", ":"))
-    try:
-        result_text = native_module.build_write_back_plan(
-            str(game_path),
-            str(db_path),
-            payload_text,
-            mode,
-            confirm_font_overwrite,
-        )
-    except ValueError as error:
-        raise RuntimeError(str(error)) from error
-    result = _ensure_object(cast(object, json.loads(result_text)), "native_write_back_plan")
+    result = _ensure_object(
+        invoke_native(
+            "write_back.plan",
+            {
+                "game_path": str(game_path),
+                "db_path": str(db_path),
+                "setting": native_payload,
+                "mode": mode,
+                "confirm_font_overwrite": confirm_font_overwrite,
+            },
+        ),
+        "native_write_back_plan",
+    )
     status = result.get("status")
     if status == "error":
         raise RuntimeError(_format_native_error_result(result))
@@ -116,15 +99,6 @@ def build_native_write_back_plan(
         summary=_parse_summary(result),
         timings_ms=_parse_timings(result),
     )
-
-
-def _load_native_module() -> NativeWritePlanModule:
-    """加载 PyO3 扩展。"""
-    try:
-        native_module = import_module("app._native")
-    except ImportError as error:
-        raise RuntimeError("Rust 原生扩展不可用，请先执行 uv run maturin develop") from error
-    return cast(NativeWritePlanModule, cast(object, native_module))
 
 
 def _parse_planned_files(

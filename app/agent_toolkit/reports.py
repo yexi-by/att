@@ -5,6 +5,7 @@ from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.diagnostics import current_diagnostic_snapshot
 from app.rmmz.text_rules import JsonObject
 
 type AgentReportStatus = Literal["ok", "warning", "error"]
@@ -19,6 +20,15 @@ class AgentIssue(BaseModel):
     message: str
 
 
+class AgentDiagnostics(BaseModel):
+    """仅在 `--debug` 报告中出现的阶段诊断。"""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+    timings: dict[str, int] = Field(default_factory=dict)
+    scan_counts: dict[str, int] = Field(default_factory=dict)
+
+
 class AgentReport(BaseModel):
     """供终端和外部 Agent 使用的统一报告结构。"""
 
@@ -29,6 +39,7 @@ class AgentReport(BaseModel):
     warnings: list[AgentIssue] = Field(default_factory=list)
     summary: JsonObject = Field(default_factory=dict)
     details: JsonObject = Field(default_factory=dict)
+    diagnostics: AgentDiagnostics | None = None
 
     @classmethod
     def from_parts(
@@ -56,7 +67,18 @@ class AgentReport(BaseModel):
 
     def to_json_text(self) -> str:
         """序列化为稳定的 UTF-8 JSON 文本。"""
-        return json.dumps(self.model_dump(mode="json"), ensure_ascii=False, indent=2)
+        payload = self.model_dump(mode="json")
+        if self.diagnostics is None:
+            diagnostic_snapshot = current_diagnostic_snapshot()
+            if diagnostic_snapshot is None:
+                if "diagnostics" in payload:
+                    del payload["diagnostics"]
+            else:
+                payload["diagnostics"] = AgentDiagnostics(
+                    timings=diagnostic_snapshot.timings,
+                    scan_counts=diagnostic_snapshot.scan_counts,
+                ).model_dump(mode="json")
+        return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def issue(code: str, message: str) -> AgentIssue:
@@ -65,6 +87,7 @@ def issue(code: str, message: str) -> AgentIssue:
 
 
 __all__: list[str] = [
+    "AgentDiagnostics",
     "AgentIssue",
     "AgentReport",
     "AgentReportStatus",

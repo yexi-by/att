@@ -8,8 +8,8 @@ use std::collections::HashMap;
 
 use super::super::details::base_detail;
 use super::super::models::{CompiledRules, NativeSourceResidualRule, NativeTranslationItem};
-use super::super::placeholders::{build_placeholders, mask_translation_controls};
 use super::super::rules::PLACEHOLDER_RE;
+use super::PreparedControlState;
 
 #[derive(Debug, Clone)]
 pub(super) struct IndexedResidualRules {
@@ -91,38 +91,9 @@ pub(super) fn collect_residual_detail(
     item: &NativeTranslationItem,
     rules: &CompiledRules,
     residual_rules: &IndexedResidualRules,
+    prepared: &Result<PreparedControlState, String>,
 ) -> Option<Value> {
-    let allowed_terms = residual_rules
-        .position_rules
-        .get(&item.location_path)
-        .map(|rule| rule.allowed_terms.as_slice())
-        .unwrap_or(&[]);
-    let control_masked_lines = match build_placeholders(item, rules)
-        .and_then(|placeholder_build| mask_translation_controls(item, rules, &placeholder_build))
-    {
-        Ok(lines) => lines,
-        Err(reason) => {
-            let mut detail = base_detail(item);
-            detail.insert("reason".to_string(), json!(reason));
-            return Some(Value::Object(detail));
-        }
-    };
-    let checked_lines = mask_allowed_terms(
-        &control_masked_lines,
-        allowed_terms,
-        rules.source_residual_terms_ignore_case,
-    );
-    let checked_lines = mask_structural_terms(
-        &checked_lines,
-        &residual_rules.structural_rules,
-        rules.source_residual_terms_ignore_case,
-    );
-    let checked_lines = mask_allowed_terms(
-        &checked_lines,
-        &rules.allowed_source_residual_terms,
-        rules.source_residual_terms_ignore_case,
-    );
-    match check_source_residual(&checked_lines, rules) {
+    match check_residual_item(item, rules, residual_rules, prepared) {
         Ok(()) => None,
         Err(reason) => {
             let mut detail = base_detail(item);
@@ -136,6 +107,62 @@ pub(super) fn collect_residual_detail(
             Some(Value::Object(detail))
         }
     }
+}
+
+/// 判断单条译文是否存在源文残留，不构造报告明细。
+pub(super) fn has_residual_issue(
+    item: &NativeTranslationItem,
+    rules: &CompiledRules,
+    residual_rules: &IndexedResidualRules,
+    prepared: &Result<PreparedControlState, String>,
+) -> bool {
+    match build_checked_residual_lines(item, rules, residual_rules, prepared) {
+        Ok(lines) => has_source_residual(&lines, rules),
+        Err(_) => true,
+    }
+}
+
+fn check_residual_item(
+    item: &NativeTranslationItem,
+    rules: &CompiledRules,
+    residual_rules: &IndexedResidualRules,
+    prepared: &Result<PreparedControlState, String>,
+) -> Result<(), String> {
+    let checked_lines = build_checked_residual_lines(item, rules, residual_rules, prepared)?;
+    check_source_residual(&checked_lines, rules)
+}
+
+fn build_checked_residual_lines(
+    item: &NativeTranslationItem,
+    rules: &CompiledRules,
+    residual_rules: &IndexedResidualRules,
+    prepared: &Result<PreparedControlState, String>,
+) -> Result<Vec<String>, String> {
+    let allowed_terms = residual_rules
+        .position_rules
+        .get(&item.location_path)
+        .map(|rule| rule.allowed_terms.as_slice())
+        .unwrap_or(&[]);
+    let control_masked_lines = match prepared {
+        Ok(prepared) => &prepared.translation_lines_with_placeholders,
+        Err(reason) => return Err(reason.clone()),
+    };
+    let checked_lines = mask_allowed_terms(
+        control_masked_lines,
+        allowed_terms,
+        rules.source_residual_terms_ignore_case,
+    );
+    let checked_lines = mask_structural_terms(
+        &checked_lines,
+        &residual_rules.structural_rules,
+        rules.source_residual_terms_ignore_case,
+    );
+    let checked_lines = mask_allowed_terms(
+        &checked_lines,
+        &rules.allowed_source_residual_terms,
+        rules.source_residual_terms_ignore_case,
+    );
+    Ok(checked_lines)
 }
 
 fn mask_structural_terms(
@@ -330,6 +357,37 @@ fn check_source_residual(lines: &[String], rules: &CompiledRules) -> Result<(), 
         }
     }
     Ok(())
+}
+
+fn has_source_residual(lines: &[String], rules: &CompiledRules) -> bool {
+    for line in lines {
+        let cleaned_line = strip_non_content_for_residual(line, rules);
+        let has_non_source_content = has_non_source_content(&cleaned_line, rules);
+        for segment in rules.source_residual_segment_re.find_iter(&cleaned_line) {
+            let filtered: Vec<char> = segment
+                .as_str()
+                .chars()
+                .filter(|char_value| !rules.source_residual_allowed_chars.contains(char_value))
+                .collect();
+            if filtered.is_empty() {
+                if !has_non_source_content {
+                    return true;
+                }
+                continue;
+            }
+            if has_non_source_content
+                && filtered.iter().all(|char_value| {
+                    rules
+                        .source_residual_allowed_tail_chars
+                        .contains(char_value)
+                })
+            {
+                continue;
+            }
+            return true;
+        }
+    }
+    false
 }
 
 fn strip_non_content_for_residual(text: &str, rules: &CompiledRules) -> String {

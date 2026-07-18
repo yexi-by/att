@@ -161,6 +161,7 @@ pub(super) struct MvVirtualSpeaker {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SettingPayload {
     pub(super) quality_text_rules: Option<NativeTextRules>,
     pub(super) replacement_font_path: Option<String>,

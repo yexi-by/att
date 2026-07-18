@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import final
 
+from app.native_file_hashing import NativeFileHashInput, hash_native_files
 from app.plugin_text import extract_plugin_name
 from app.rmmz.schema import (
     GameData,
@@ -15,15 +18,14 @@ from app.rmmz.schema import (
 )
 from app.rmmz.text_rules import JsonArray, JsonObject, TextRules
 
+from .runtime_mapping import plugin_source_runtime_hash_text
 from .scanner import (
     PluginSourceBatchTextScan,
     PluginSourceCandidateIndex,
     PluginSourceFileTextScan,
     PluginSourceStringLiteral,
-    build_plugin_source_file_hash,
     scan_plugin_source_files_text_strict,
 )
-from .runtime_mapping import plugin_source_runtime_hash_text
 
 RAW_LITERAL_LINE_BREAK_CONTROL_PATTERN: re.Pattern[str] = re.compile(
     r"(?<!\\)\\n(?P<fragment>[A-Za-z]+\d*\[[^\]\r\n]{0,64}\])"
@@ -31,6 +33,16 @@ RAW_LITERAL_LINE_BREAK_CONTROL_PATTERN: re.Pattern[str] = re.compile(
 VISIBLE_LINE_START_CONTROL_PATTERN: re.Pattern[str] = re.compile(
     r"(?:(?<=\n)|(?<=\r))(?P<fragment>[A-Za-z]+\d*\[[^\]\r\n]{0,64}\])"
 )
+
+
+@final
+class RuntimePluginSourceScanError(RuntimeError):
+    """当前运行插件源码扫描阶段的结构化错误。"""
+
+    def __init__(self, *, code: str, message: str, details: JsonObject) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +117,7 @@ class ActiveRuntimePluginSourceAudit:
     active_literal_count: int
     read_error_file_count: int
     scan_cache_stats: ActiveRuntimePluginSourceScanCacheStats | None = None
+    file_hashes: dict[str, str] = field(default_factory=dict, repr=False)
 
     @property
     def issue_counts(self) -> Counter[str]:
@@ -151,28 +164,24 @@ def audit_active_runtime_plugin_source(
     enabled_plugin_files = _enabled_plugin_source_file_names(game_data)
     source_files = plugin_source_files if plugin_source_files is not None else game_data.plugin_source_files
     read_errors = (
-        plugin_source_read_errors
-        if plugin_source_read_errors is not None
-        else game_data.plugin_source_read_errors
+        plugin_source_read_errors if plugin_source_read_errors is not None else game_data.plugin_source_read_errors
     )
     issues: list[ActiveRuntimePluginSourceIssue] = []
     runtime_write_map_by_key = {
-        (record.runtime_file_name, record.runtime_selector): record
-        for record in (runtime_write_map_records or [])
+        (record.runtime_file_name, record.runtime_selector): record for record in (runtime_write_map_records or [])
     }
     literal_count = 0
     active_literal_count = 0
-    active_read_error_file_names = {
-        file_name
-        for file_name in read_errors
-        if file_name in enabled_plugin_files
-    }
+    active_read_error_file_names = {file_name for file_name in read_errors if file_name in enabled_plugin_files}
     active_missing_file_names = set(enabled_plugin_files) - set(source_files) - set(read_errors)
     active_file_count = len(active_read_error_file_names) + len(active_missing_file_names)
     batch_scan = plugin_source_batch_scan or scan_plugin_source_files_text_strict(
         files=source_files,
         active_file_names=enabled_plugin_files,
     )
+    current_file_hashes = dict(batch_scan.file_hashes)
+    for file_name, file_scan in batch_scan.file_scans.items():
+        _ = current_file_hashes.setdefault(file_name, file_scan.file_hash)
     for file_name in sorted(active_read_error_file_names):
         issues.append(
             ActiveRuntimePluginSourceIssue(
@@ -234,6 +243,7 @@ def audit_active_runtime_plugin_source(
         active_literal_count=active_literal_count,
         read_error_file_count=len(set(read_errors) | active_missing_file_names),
         scan_cache_stats=scan_cache_stats,
+        file_hashes=current_file_hashes,
     )
 
 
@@ -249,6 +259,7 @@ def audit_active_runtime_plugin_source_with_scan_cache(
     """审计当前运行插件源码，并按文件 hash 复用 AST 扫描缓存。"""
     enabled_plugin_files = _enabled_plugin_source_file_names(game_data)
     batch_scan, refreshed_cache_records, scan_cache_stats = scan_plugin_source_files_text_strict_with_cache(
+        content_root=game_data.layout.content_root,
         files=game_data.plugin_source_files,
         active_file_names=enabled_plugin_files,
         cache_records=cache_records,
@@ -267,6 +278,7 @@ def audit_active_runtime_plugin_source_with_scan_cache(
 
 def scan_plugin_source_files_text_strict_with_cache(
     *,
+    content_root: Path,
     files: dict[str, str],
     active_file_names: frozenset[str],
     cache_records: list[PluginSourceRuntimeScanCacheRecord],
@@ -277,14 +289,11 @@ def scan_plugin_source_files_text_strict_with_cache(
     ActiveRuntimePluginSourceScanCacheStats,
 ]:
     """按文件 hash 复用当前运行插件源码 AST 扫描结果。"""
-    cached_by_file = {
-        record.file_name: record
-        for record in cache_records
-    }
-    current_hashes = {
-        file_name: build_plugin_source_file_hash(source)
-        for file_name, source in files.items()
-    }
+    cached_by_file = {record.file_name: record for record in cache_records}
+    current_hashes = _hash_runtime_plugin_source_files(
+        content_root=content_root,
+        file_names=tuple(sorted(files)),
+    )
     file_scans: dict[str, PluginSourceFileTextScan] = {}
     syntax_errors: dict[str, str] = {}
     uncached_files: dict[str, str] = {}
@@ -319,12 +328,18 @@ def scan_plugin_source_files_text_strict_with_cache(
             active_file_names=active_file_names,
             text_rules=None,
         )
+        _validate_fresh_scan_hashes(
+            file_names=tuple(sorted(uncached_files)),
+            precheck_hashes=current_hashes,
+            parsed_hashes=fresh_scan.file_hashes,
+        )
         file_scans.update(fresh_scan.file_scans)
         syntax_errors.update(fresh_scan.syntax_errors)
 
     batch_scan = PluginSourceBatchTextScan(
         file_scans=file_scans,
         syntax_errors=syntax_errors,
+        file_hashes=current_hashes,
     )
     refreshed_cache_records = _cache_records_from_batch_scan(
         batch_scan=batch_scan,
@@ -343,6 +358,56 @@ def scan_plugin_source_files_text_strict_with_cache(
         refreshed_record_count=len(refreshed_cache_records),
     )
     return batch_scan, refreshed_cache_records, scan_cache_stats
+
+
+def _hash_runtime_plugin_source_files(
+    *,
+    content_root: Path,
+    file_names: tuple[str, ...],
+) -> dict[str, str]:
+    """在一次原生调用中读取当前运行插件源码的实际文件哈希。"""
+    results = hash_native_files(
+        root=content_root,
+        files=[
+            NativeFileHashInput(
+                id=file_name,
+                relative_path=f"js/plugins/{file_name}",
+            )
+            for file_name in file_names
+        ],
+    )
+    return {result.id: result.sha256 for result in results}
+
+
+def _validate_fresh_scan_hashes(
+    *,
+    file_names: tuple[str, ...],
+    precheck_hashes: dict[str, str],
+    parsed_hashes: dict[str, str],
+) -> None:
+    """校验 AST 解析的内存文本与运行目录预检字节完全一致。"""
+    for file_name in file_names:
+        precheck_sha256 = precheck_hashes[file_name]
+        parsed_sha256 = parsed_hashes.get(file_name)
+        if parsed_sha256 is None:
+            raise RuntimePluginSourceScanError(
+                code="runtime_plugin_source_scan_hash_missing",
+                message=f"当前运行插件源码 AST 扫描缺少文件哈希: {file_name}",
+                details={
+                    "file_name": file_name,
+                    "precheck_sha256": precheck_sha256,
+                },
+            )
+        if parsed_sha256 != precheck_sha256:
+            raise RuntimePluginSourceScanError(
+                code="runtime_plugin_source_changed_during_scan",
+                message=f"当前运行插件源码在文件哈希预检与 AST 扫描之间已变化: {file_name}",
+                details={
+                    "file_name": file_name,
+                    "precheck_sha256": precheck_sha256,
+                    "parsed_sha256": parsed_sha256,
+                },
+            )
 
 
 def _file_scan_from_cache_record(
@@ -532,6 +597,7 @@ __all__ = [
     "ActiveRuntimePluginSourceAudit",
     "ActiveRuntimePluginSourceIssue",
     "ActiveRuntimePluginSourceScanCacheStats",
+    "RuntimePluginSourceScanError",
     "audit_active_runtime_plugin_source",
     "audit_active_runtime_plugin_source_with_scan_cache",
     "scan_plugin_source_files_text_strict_with_cache",

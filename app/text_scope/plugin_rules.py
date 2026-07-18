@@ -16,6 +16,21 @@ async def read_fresh_plugin_text_rules(
 ) -> tuple[list[PluginTextRuleRecord], list[StalePluginRule]]:
     """读取仍匹配当前 `plugins.js` 的插件规则，并返回过期规则明细。"""
     plugin_rules = await session.read_plugin_text_rules()
+    return filter_fresh_plugin_text_rules(
+        game_data=game_data,
+        plugin_rules=plugin_rules,
+    )
+
+
+def filter_fresh_plugin_text_rules(
+    *,
+    game_data: GameData,
+    plugin_rules: list[PluginTextRuleRecord],
+) -> tuple[list[PluginTextRuleRecord], list[StalePluginRule]]:
+    """从已加载规则中筛选仍匹配当前 `plugins.js` 的记录。
+
+    这个纯函数供单命令分析上下文复用，避免为同一命令反复读取数据库。
+    """
     fresh_rules: list[PluginTextRuleRecord] = []
     stale_rules: list[StalePluginRule] = []
     for rule in plugin_rules:

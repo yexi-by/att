@@ -1,3 +1,5 @@
+<!-- 此文件由 scripts/generate_skill_protocol.py 生成；请修改 skills/att-mz-protocol 后重新生成。 -->
+
 # MV 虚拟名字框规则
 
 本参考只用于 RPG Maker MV。MZ 使用标准 `101.parameters[4]` 名字框，不使用本规则。
