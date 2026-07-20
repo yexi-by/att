@@ -736,8 +736,72 @@ def build_project_wheel(python: Path, wheel_dir: Path, env: dict[str, str]) -> P
     if len(wheels) != 1:
         raise RuntimeError(f"项目 wheel 数量或标签异常：{[path.name for path in wheel_dir.glob('*.whl')]}")
     wheel = wheels[0]
+    normalize_wheel_archive(wheel)
     validate_project_wheel_contents(wheel)
     return wheel
+
+
+def _validate_wheel_member_name(name: str) -> bool:
+    """验证 wheel 成员名，并返回它是否为目录。"""
+    if not name or "\\" in name or "\x00" in name or name.startswith("/"):
+        raise RuntimeError(f"项目 wheel 含不安全成员名：{name!r}")
+    is_directory = name.endswith("/")
+    candidate = name[:-1] if is_directory else name
+    parts = candidate.split("/")
+    if (
+        not candidate
+        or any(part in {"", ".", ".."} for part in parts)
+        or ":" in parts[0]
+        or PurePosixPath(*parts).as_posix() != candidate
+    ):
+        raise RuntimeError(f"项目 wheel 含不安全成员名：{name!r}")
+    return is_directory
+
+
+def normalize_wheel_archive(wheel: Path) -> None:
+    """固定 wheel 成员顺序和 ZIP 元数据，消除 maturin 的构建时刻漂移。"""
+    _ = _validate_managed_target(wheel, wheel.parent, expected="file")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{wheel.name}.", suffix=".tmp", dir=wheel.parent)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        with zipfile.ZipFile(wheel, "r") as source:
+            members = source.infolist()
+            seen_names: set[str] = set()
+            normalized_members: list[tuple[str, bool, bytes]] = []
+            for member in members:
+                is_directory = _validate_wheel_member_name(member.orig_filename)
+                if member.orig_filename != member.filename:
+                    raise RuntimeError(f"项目 wheel 成员名被 ZIP 解析器改写：{member.orig_filename!r}")
+                collision_key = member.filename.rstrip("/").casefold()
+                if collision_key in seen_names:
+                    raise RuntimeError(f"项目 wheel 含重复或大小写冲突成员：{member.filename!r}")
+                seen_names.add(collision_key)
+                if member.flag_bits & 0x1:
+                    raise RuntimeError(f"项目 wheel 含加密成员：{member.filename!r}")
+                unix_mode = member.external_attr >> 16
+                if member.create_system == 3 and stat.S_ISLNK(unix_mode):
+                    raise RuntimeError(f"项目 wheel 含符号链接成员：{member.filename!r}")
+                data = source.read(member)
+                if is_directory and data:
+                    raise RuntimeError(f"项目 wheel 的目录成员含数据：{member.filename!r}")
+                normalized_members.append((member.filename, is_directory, data))
+
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as target:
+            for name, is_directory, data in sorted(normalized_members, key=lambda item: item[0]):
+                info = zipfile.ZipInfo(name)
+                info.date_time = FIXED_ZIP_TIMESTAMP
+                info.create_system = 3
+                if is_directory:
+                    info.compress_type = zipfile.ZIP_STORED
+                    info.external_attr = ((stat.S_IFDIR | 0o755) << 16) | 0x10
+                else:
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    info.external_attr = (stat.S_IFREG | 0o644) << 16
+                target.writestr(info, data, compresslevel=9)
+        os.replace(temporary, wheel)
+    finally:
+        unlink_managed_file(temporary, managed_root=wheel.parent, missing_ok=True)
 
 
 def validate_project_wheel_contents(wheel: Path) -> None:

@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from scripts.build_release import (
     encode_path_markers,
     filter_trusted_upstream_path_labels,
     find_path_marker_labels,
+    normalize_wheel_archive,
     reproducible_build_environment,
 )
 from scripts.release_safety_selftest import assert_runtime_metadata_determinism
@@ -126,3 +128,78 @@ def test_maturin_sbom_is_disabled_for_reproducible_release_wheel() -> None:
     configuration = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert configuration["tool"]["maturin"]["sbom"] == {"rust": False, "auditwheel": False}
+
+
+def test_release_checkout_text_is_fixed_to_lf() -> None:
+    """Windows fresh checkout 的打包输入必须固定为 LF。"""
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+
+    assert "* text=auto eol=lf" in attributes
+
+
+def _write_test_wheel(
+    path: Path,
+    *,
+    names: tuple[str, ...],
+    timestamp: tuple[int, int, int, int, int, int],
+    mode: int,
+) -> None:
+    """写入带可控 ZIP 漂移的最小测试 wheel。"""
+    payloads = {
+        "app/__init__.py": b'__version__ = "0.1.15"\n',
+        "att_mz-0.1.15.dist-info/RECORD": b"app/__init__.py,,\natt_mz-0.1.15.dist-info/RECORD,,\n",
+    }
+    with zipfile.ZipFile(path, "w") as archive:
+        for name in names:
+            info = zipfile.ZipInfo(name)
+            info.filename = name
+            info.orig_filename = name
+            info.date_time = timestamp
+            info.create_system = 3
+            info.external_attr = mode << 16
+            info.extra = b"\x0a\x00\x00\x00"
+            archive.writestr(info, payloads.get(name, b""))
+
+
+def test_normalize_wheel_archive_is_reproducible_and_idempotent(tmp_path: Path) -> None:
+    """成员数据相同时，顺序和 ZIP 元数据不得影响 wheel 字节。"""
+    names = ("app/__init__.py", "att_mz-0.1.15.dist-info/RECORD")
+    left = tmp_path / "left.whl"
+    right = tmp_path / "right.whl"
+    _write_test_wheel(left, names=names, timestamp=(2025, 1, 2, 3, 4, 6), mode=0o600)
+    _write_test_wheel(right, names=tuple(reversed(names)), timestamp=(2026, 7, 20, 12, 0, 0), mode=0o666)
+
+    normalize_wheel_archive(left)
+    normalize_wheel_archive(right)
+
+    expected = left.read_bytes()
+    assert right.read_bytes() == expected
+    normalize_wheel_archive(left)
+    assert left.read_bytes() == expected
+    with zipfile.ZipFile(left) as archive:
+        assert archive.namelist() == sorted(names)
+        assert all(member.date_time == (2026, 1, 1, 0, 0, 0) for member in archive.infolist())
+
+
+@pytest.mark.parametrize("member_name", ("../evil.py", "/evil.py", "C:/evil.py", "app\\evil.py", "app//evil.py"))
+def test_normalize_wheel_archive_rejects_unsafe_member_names(tmp_path: Path, member_name: str) -> None:
+    """wheel 规范化不得接受可越界或平台歧义的成员名。"""
+    wheel = tmp_path / "unsafe.whl"
+    _write_test_wheel(wheel, names=(member_name,), timestamp=(2026, 1, 1, 0, 0, 0), mode=0o644)
+
+    with pytest.raises(RuntimeError, match="不安全成员名"):
+        normalize_wheel_archive(wheel)
+
+
+def test_normalize_wheel_archive_rejects_casefold_collisions(tmp_path: Path) -> None:
+    """Windows 下会落到同一路径的 wheel 成员必须拒绝。"""
+    wheel = tmp_path / "duplicate.whl"
+    _write_test_wheel(
+        wheel,
+        names=("app/module.py", "APP/MODULE.PY"),
+        timestamp=(2026, 1, 1, 0, 0, 0),
+        mode=0o644,
+    )
+
+    with pytest.raises(RuntimeError, match="重复或大小写冲突"):
+        normalize_wheel_archive(wheel)

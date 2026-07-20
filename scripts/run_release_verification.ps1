@@ -88,6 +88,58 @@ function Assert-CleanWorkspace {
     }
 }
 
+function Assert-ReleaseTextUsesLf {
+    param([string]$Worktree)
+    $textExtensions = @(".json", ".md", ".py", ".ps1", ".rs", ".sql", ".toml", ".yaml", ".yml")
+    $trackedFiles = @(git -C $Worktree ls-files)
+    if ($LASTEXITCODE -ne 0) { throw "无法读取复现工作树文件：$Worktree" }
+    $invalid = @()
+    foreach ($relativePath in $trackedFiles) {
+        $extension = [IO.Path]::GetExtension($relativePath).ToLowerInvariant()
+        if ($extension -notin $textExtensions -and $relativePath -cne "uv.lock") { continue }
+        $bytes = [IO.File]::ReadAllBytes((Join-Path $Worktree $relativePath))
+        if ([Array]::IndexOf($bytes, [byte]13) -ge 0) { $invalid += $relativePath }
+    }
+    if ($invalid.Count -ne 0) {
+        throw "复现工作树包含非 LF 文本：$($invalid[0..([Math]::Min(19, $invalid.Count - 1))] -join ', ')"
+    }
+}
+
+function Invoke-ReleaseBuildInWorktree {
+    param([string]$Worktree, [string]$ArchiveName)
+    Assert-NormalDirectory $Worktree "复现工作树"
+    Assert-ReleaseTextUsesLf $Worktree
+    Push-Location $Worktree
+    try {
+        $buildOutput = @(uv run --locked --python 3.14.6 python scripts/build_release.py `
+            --output-dir "release-output" `
+            --zip-name $ArchiveName)
+        $buildExitCode = $LASTEXITCODE
+        $buildOutput | Out-Host
+        if ($buildExitCode -ne 0) { throw "复现发行构建失败，退出码 $buildExitCode" }
+    }
+    finally {
+        Pop-Location
+    }
+    $output = Join-Path $Worktree "release-output"
+    Assert-NormalDirectory $output "复现构建输出"
+    return $output
+}
+
+function Copy-ReleaseHandoff {
+    param([string]$Source, [string]$Destination, [string]$ArchiveName)
+    if (Test-Path -LiteralPath $Destination) {
+        throw "发布附件目标必须不存在：$Destination"
+    }
+    New-Item -ItemType Directory -Path $Destination | Out-Null
+    Assert-NormalDirectory $Destination "发布附件目标"
+    foreach ($name in @($ArchiveName, "SHA256SUMS.txt", "pylock.windows-x86_64.toml", "release-manifest.json")) {
+        $sourceFile = Join-Path $Source $name
+        if (!(Test-Path -LiteralPath $sourceFile -PathType Leaf)) { throw "缺少发布附件：$sourceFile" }
+        Copy-Item -LiteralPath $sourceFile -Destination (Join-Path $Destination $name)
+    }
+}
+
 Assert-NormalDirectory $projectRoot "发布工作区"
 
 function Resolve-ReleaseInputs {
@@ -155,6 +207,8 @@ if ($ValidateInputsOnly) {
     return
 }
 
+$reproRoot = $null
+$reproWorktrees = @()
 Push-Location $projectRoot
 try {
     Assert-CleanWorkspace "发布验证开始前"
@@ -213,8 +267,32 @@ try {
 
     Assert-CleanWorkspace "发行包构建前"
 
-    uv run --locked python scripts/build_release.py --output-dir $distAPath --zip-name $ZipName
-    uv run --locked python scripts/build_release.py --output-dir $distBPath --zip-name $ZipName
+    $reproParent = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+        [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+    }
+    else {
+        [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+    }
+    Assert-NormalDirectory $reproParent "复现工作树父目录"
+    $reproRoot = Join-Path $reproParent "att-mz-repro-$([guid]::NewGuid().ToString('N'))"
+    if ($reproRoot.IndexOfAny([char[]]@(' ', "`t", "`r", "`n")) -ge 0) {
+        throw "复现工作树路径不得包含空白：$reproRoot"
+    }
+    New-Item -ItemType Directory -Path $reproRoot | Out-Null
+    Assert-NormalDirectory $reproRoot "复现工作树根目录"
+    $expectedSha = (git rev-parse HEAD).Trim().ToLowerInvariant()
+    $worktreeA = Join-Path $reproRoot "source-a"
+    $worktreeB = Join-Path $reproRoot "source-b-with-longer-root"
+    foreach ($worktree in @($worktreeA, $worktreeB)) {
+        git worktree add --detach $worktree $expectedSha
+        $reproWorktrees += $worktree
+        $actualSha = (git -C $worktree rev-parse HEAD).Trim().ToLowerInvariant()
+        if ($actualSha -cne $expectedSha) {
+            throw "复现工作树提交漂移：expected=$expectedSha actual=$actualSha"
+        }
+    }
+    $buildDistAPath = Invoke-ReleaseBuildInWorktree $worktreeA $ZipName
+    $buildDistBPath = Invoke-ReleaseBuildInWorktree $worktreeB $ZipName
 
     $relativePaths = @(
         $ZipName,
@@ -226,8 +304,8 @@ try {
         "att-mz\runtime\python.exe"
     )
     foreach ($relativePath in $relativePaths) {
-        $left = Join-Path $distAPath $relativePath
-        $right = Join-Path $distBPath $relativePath
+        $left = Join-Path $buildDistAPath $relativePath
+        $right = Join-Path $buildDistBPath $relativePath
         if (!(Test-Path -LiteralPath $left -PathType Leaf) -or !(Test-Path -LiteralPath $right -PathType Leaf)) {
             throw "缺少可复现性比较文件：$relativePath"
         }
@@ -239,8 +317,8 @@ try {
     }
 
     $nativeRelativeRoot = "att-mz\runtime\Lib\site-packages\app"
-    $leftNative = @(Get-ChildItem -LiteralPath (Join-Path $distAPath $nativeRelativeRoot) -Filter "_native*.pyd")
-    $rightNative = @(Get-ChildItem -LiteralPath (Join-Path $distBPath $nativeRelativeRoot) -Filter "_native*.pyd")
+    $leftNative = @(Get-ChildItem -LiteralPath (Join-Path $buildDistAPath $nativeRelativeRoot) -Filter "_native*.pyd")
+    $rightNative = @(Get-ChildItem -LiteralPath (Join-Path $buildDistBPath $nativeRelativeRoot) -Filter "_native*.pyd")
     if ($leftNative.Count -ne 1 -or $rightNative.Count -ne 1) {
         throw "发行包必须且只能包含一个 app._native 扩展模块"
     }
@@ -299,7 +377,7 @@ try {
         New-LocalUser -Name $userName -Password $password -PasswordNeverExpires | Out-Null
         $userCreated = $true
         New-Item -ItemType Directory -Force -Path $shared | Out-Null
-        Copy-Item -LiteralPath (Join-Path $distAPath $ZipName) -Destination (Join-Path $shared "release.zip")
+        Copy-Item -LiteralPath (Join-Path $buildDistAPath $ZipName) -Destination (Join-Path $shared "release.zip")
         Copy-Item -LiteralPath "scripts\smoke_release_windows.ps1" -Destination (Join-Path $shared "smoke.ps1")
         icacls $shared /grant "${userName}:(OI)(CI)F" /T | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "无法授予普通用户冒烟目录权限" }
@@ -369,7 +447,32 @@ try {
             if (Test-Path -LiteralPath $developerModePath) { throw "Developer Mode 原缺失键恢复失败" }
         }
     }
+
+    Copy-ReleaseHandoff $buildDistAPath $distAPath $ZipName
+    Copy-ReleaseHandoff $buildDistBPath $distBPath $ZipName
 }
 finally {
-    Pop-Location
+    try {
+        for ($index = $reproWorktrees.Count - 1; $index -ge 0; $index--) {
+            $worktree = [IO.Path]::GetFullPath($reproWorktrees[$index])
+            if (!(Test-SamePath ([IO.Path]::GetDirectoryName($worktree)) $reproRoot)) {
+                throw "拒绝清理越出复现根目录的工作树：$worktree"
+            }
+            if (Test-Path -LiteralPath $worktree) {
+                Assert-NormalDirectory $worktree "待清理复现工作树"
+                git worktree remove --force $worktree
+            }
+        }
+        git worktree prune
+        if ($null -ne $reproRoot -and (Test-Path -LiteralPath $reproRoot)) {
+            Assert-NormalDirectory $reproRoot "待清理复现根目录"
+            if (@(Get-ChildItem -LiteralPath $reproRoot -Force).Count -ne 0) {
+                throw "复现根目录清理后仍非空：$reproRoot"
+            }
+            Remove-Item -LiteralPath $reproRoot -Force
+        }
+    }
+    finally {
+        Pop-Location
+    }
 }
