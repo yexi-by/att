@@ -8,6 +8,7 @@ import os
 import stat
 import sys
 from dataclasses import dataclass
+from io import TextIOWrapper
 from pathlib import Path
 from typing import cast, final
 
@@ -52,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     """执行生成或漂移检查。"""
+    configure_stdio_encoding()
     args = build_parser().parse_args()
     assert_no_links_or_reparse_points(
         CANONICAL_ROOT,
@@ -82,6 +84,13 @@ def main() -> int:
         return 1
     print("Skill 协议生成物与 canonical 源一致")
     return 0
+
+
+def configure_stdio_encoding() -> None:
+    """固定生成器的终端编码，避免 Windows 默认代码页无法输出中文。"""
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, TextIOWrapper):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 def load_variants() -> dict[str, Variant]:
