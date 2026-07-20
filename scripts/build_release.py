@@ -75,6 +75,23 @@ RUNTIME_FORBIDDEN_DEVELOPMENT_SUFFIXES = frozenset(
 )
 RUNTIME_FORBIDDEN_SUFFIXES = RUNTIME_FORBIDDEN_SOURCE_SUFFIXES | RUNTIME_FORBIDDEN_DEVELOPMENT_SUFFIXES
 RUNTIME_REMOVED_INSTALL_METADATA = frozenset({"direct_url.json", "uv_cache.json"})
+LOCKED_UPSTREAM_NATIVE_PATH_HASHES = {
+    "runtime/Lib/site-packages/jiter/jiter.cp314-win_amd64.pyd": (
+        "a8667364630d7d4e9cfd03eda2fd3aa4f718503ab1d210b5561b3a0220bcbd74"
+    ),
+    "runtime/Lib/site-packages/pydantic_core/_pydantic_core.cp314-win_amd64.pyd": (
+        "b1ff5a0116240defde85b479809c511d56187d945c5d3313e8871ad52b9df550"
+    ),
+}
+UPSTREAM_TOOLCHAIN_PATH_LABELS = frozenset(
+    {
+        "cargo_home",
+        "home",
+        "resolved_home",
+        "rust_sysroot",
+        "user_profile",
+    }
+)
 
 _COMPILE_SOURCELESS_SCRIPT = r"""
 import json
@@ -571,18 +588,56 @@ def reproducible_build_environment(cargo_target_dir: Path, *, static_crt: bool =
     sysroot = Path(run_checked(["rustc", "--print", "sysroot"]).stdout.strip()).resolve()
     cargo_home = Path(env.get("CARGO_HOME", Path.home() / ".cargo")).resolve()
     user_profile = Path(env.get("USERPROFILE", Path.home())).resolve()
-    remap_sources = (
+    raw_remap_sources = (
         (cargo_target_dir.resolve(), ".cargo-target"),
         (ROOT.resolve(), ".source"),
         (sysroot, ".rust-sysroot"),
         (cargo_home, ".cargo-home"),
         (user_profile, ".user-profile"),
     )
-    remap = " ".join(f"--remap-path-prefix={source}={replacement}" for source, replacement in remap_sources)
-    crt_flag = " -C target-feature=+crt-static" if static_crt else ""
-    rust_flags = f"-C debuginfo=0 -C link-arg=/Brepro{crt_flag} {remap}"
-    existing = env.get("RUSTFLAGS", "").strip()
-    env["RUSTFLAGS"] = f"{existing} {rust_flags}".strip()
+    remap_sources = sorted(
+        {
+            (variant, replacement)
+            for source, replacement in raw_remap_sources
+            for variant in (str(source), str(source).replace("\\", "/"))
+        },
+        key=lambda item: (len(item[0]), item[0], item[1]),
+    )
+    rust_flags = [
+        "-C",
+        "debuginfo=0",
+        "-C",
+        "link-arg=/Brepro",
+        "-C",
+        "link-arg=/PDBALTPATH:%_PDB%",
+    ]
+    if static_crt:
+        rust_flags.extend(("-C", "target-feature=+crt-static"))
+    rust_flags.extend(f"--remap-path-prefix={source}={replacement}" for source, replacement in remap_sources)
+    env.pop("RUSTFLAGS", None)
+    env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(rust_flags)
+
+    trim_sources = tuple(source for source, _ in remap_sources)
+    if any(any(character.isspace() for character in source) for source in trim_sources):
+        raise RuntimeError("正式 Windows 构建路径不得包含空白，否则无法安全传递 MSVC 路径净化参数")
+    c_flags = " ".join(("/Brepro", *(f"/d1trimfile:{source}" for source in trim_sources)))
+    inherited_c_flag_names = {
+        "CFLAGS",
+        "CXXFLAGS",
+        "HOST_CFLAGS",
+        "HOST_CXXFLAGS",
+        "TARGET_CFLAGS",
+        "TARGET_CXXFLAGS",
+        "CFLAGS_X86_64-PC-WINDOWS-MSVC",
+        "CXXFLAGS_X86_64-PC-WINDOWS-MSVC",
+        "CFLAGS_X86_64_PC_WINDOWS_MSVC",
+        "CXXFLAGS_X86_64_PC_WINDOWS_MSVC",
+    }
+    for name in tuple(env):
+        if name.upper() in inherited_c_flag_names:
+            del env[name]
+    env["CFLAGS_x86_64-pc-windows-msvc"] = c_flags
+    env["CXXFLAGS_x86_64-pc-windows-msvc"] = c_flags
     env["SOURCE_DATE_EPOCH"] = source_epoch
     env["CARGO_INCREMENTAL"] = "0"
     env["CARGO_TARGET_DIR"] = str(cargo_target_dir)
@@ -702,6 +757,9 @@ def validate_project_wheel_contents(wheel: Path) -> None:
         raise RuntimeError(
             f"项目 wheel 的 schema DDL 集合异常：expected={expected_schema_files}, actual={schema_files}"
         )
+    sbom_files = sorted(name for name in file_names if "/sboms/" in name)
+    if sbom_files:
+        raise RuntimeError(f"项目 wheel 不得包含带构建路径的 SBOM：{sbom_files}")
     forbidden_parts = {"tests", "rust", "scripts", "docs", "typings", "output", "outputs"}
     forbidden = [
         name for name in file_names if PurePosixPath(name).parts and PurePosixPath(name).parts[0] in forbidden_parts
@@ -1324,42 +1382,71 @@ def assert_clean_payload(release_dir: Path) -> None:
         )
 
     path_markers = {
-        str(ROOT),
-        os.environ.get("GITHUB_WORKSPACE", ""),
-        os.environ.get("RUNNER_TEMP", ""),
-        os.environ.get("CARGO_HOME", ""),
-        os.environ.get("USERPROFILE", ""),
-        os.environ.get("HOME", ""),
-        str(Path.home()),
-        run_checked(["rustc", "--print", "sysroot"]).stdout.strip(),
+        "repository": str(ROOT),
+        "github_workspace": os.environ.get("GITHUB_WORKSPACE", ""),
+        "runner_temp": os.environ.get("RUNNER_TEMP", ""),
+        "cargo_home": os.environ.get("CARGO_HOME", ""),
+        "user_profile": os.environ.get("USERPROFILE", ""),
+        "home": os.environ.get("HOME", ""),
+        "resolved_home": str(Path.home()),
+        "rust_sysroot": run_checked(["rustc", "--print", "sysroot"]).stdout.strip(),
     }
-    marker_variants: set[str] = set()
-    for marker in path_markers:
+    encoded_markers = encode_path_markers(path_markers)
+    leaks: dict[str, tuple[str, ...]] = {}
+    for path in release_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        data = path.read_bytes()
+        relative_path = path.relative_to(release_dir).as_posix()
+        matches = find_path_marker_labels(data, encoded_markers)
+        matches = filter_trusted_upstream_path_labels(relative_path, data, matches)
+        if matches:
+            leaks[relative_path] = matches
+    if leaks:
+        raise RuntimeError(f"发行文件泄露构建路径：{json.dumps(leaks, ensure_ascii=True, sort_keys=True)}")
+
+
+def encode_path_markers(path_markers: dict[str, str]) -> tuple[tuple[str, bytes], ...]:
+    """将路径标记展开为不泄露实际路径的编码标签。"""
+    encoded_markers: set[tuple[str, bytes]] = set()
+    for label, marker in path_markers.items():
         if not marker:
             continue
         normalized = marker.rstrip("/\\")
-        separators = {normalized, normalized.replace("\\", "/"), normalized.replace("/", "\\")}
-        marker_variants.update(separators)
-        marker_variants.update(urllib.parse.quote(value, safe="") for value in separators)
-        marker_variants.update(urllib.parse.quote(value, safe="/:\\") for value in separators)
+        marker_variants = {normalized, normalized.replace("\\", "/"), normalized.replace("/", "\\")}
+        original_variants = tuple(marker_variants)
+        marker_variants.update(urllib.parse.quote(value, safe="") for value in original_variants)
+        marker_variants.update(urllib.parse.quote(value, safe="/:\\") for value in original_variants)
         try:
             marker_variants.add(Path(normalized).resolve().as_uri())
         except ValueError:
             pass
-    encoded_markers = [
-        encoded
-        for marker in marker_variants
-        for encoded in (marker.casefold().encode("utf-8"), marker.casefold().encode("utf-16-le"))
-    ]
-    leaks: list[str] = []
-    for path in release_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        data = path.read_bytes().lower()
-        if any(marker in data for marker in encoded_markers):
-            leaks.append(str(path.relative_to(release_dir)))
-    if leaks:
-        raise RuntimeError(f"发行文件泄露构建路径：{leaks}")
+        for value in marker_variants:
+            casefolded = value.casefold()
+            encoded_markers.add((f"{label}:utf-8", casefolded.encode("utf-8")))
+            encoded_markers.add((f"{label}:utf-16-le", casefolded.encode("utf-16-le")))
+    return tuple(sorted(encoded_markers, key=lambda item: (item[0], item[1])))
+
+
+def find_path_marker_labels(data: bytes, encoded_markers: tuple[tuple[str, bytes], ...]) -> tuple[str, ...]:
+    """返回二进制中命中的安全路径标签，不返回真实路径。"""
+    casefolded_data = data.lower()
+    return tuple(sorted({label for label, marker in encoded_markers if marker in casefolded_data}))
+
+
+def filter_trusted_upstream_path_labels(
+    relative_path: str,
+    data: bytes,
+    labels: tuple[str, ...],
+    *,
+    trusted_hashes: dict[str, str] | None = None,
+) -> tuple[str, ...]:
+    """仅为字节已锁定的上游扩展忽略其原始工具链路径。"""
+    allowed_hashes = LOCKED_UPSTREAM_NATIVE_PATH_HASHES if trusted_hashes is None else trusted_hashes
+    expected_hash = allowed_hashes.get(relative_path)
+    if expected_hash is None or hashlib.sha256(data).hexdigest() != expected_hash:
+        return labels
+    return tuple(label for label in labels if label.split(":", maxsplit=1)[0] not in UPSTREAM_TOOLCHAIN_PATH_LABELS)
 
 
 def write_build_manifest(

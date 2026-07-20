@@ -36,6 +36,10 @@ manifest-path = "rust/Cargo.toml"
 features = ["pyo3/extension-module"]
 include = ["app/persistence/schema/current.sql"]
 
+[tool.maturin.sbom]
+rust = false
+auditwheel = false
+
 [tool.basedpyright]
 include = [
     "app",
