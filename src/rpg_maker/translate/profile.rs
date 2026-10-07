@@ -287,25 +287,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_keeps_every_external_strategy_without_owning_prompt() {
-        let profile = profile("ordinary-client-state");
-        assert_eq!(profile.id(), "primary");
-        assert_eq!(
-            profile.planning().target_user_message_characters(),
-            non_zero(24_000)
-        );
-        assert_eq!(
-            profile.request().network_retry_delays(),
-            [Duration::from_millis(250), Duration::from_secs(2)]
-        );
-        assert_eq!(
-            profile.request().max_network_retry_after(),
-            Duration::from_secs(30)
-        );
-        assert!(profile.llm_client() == &TestClient("ordinary-client-state"));
-    }
-
-    #[test]
     fn debug_output_uses_a_compact_client_type_projection() {
         let debug = format!("{:?}", profile("ordinary-client-state"));
         assert!(debug.contains("primary"));

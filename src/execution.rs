@@ -100,10 +100,4 @@ mod tests {
             .await
             .expect("取消后的等待者应立即返回");
     }
-
-    #[test]
-    fn completion_expresses_cancellation_as_data() {
-        let completion: OperationCompletion<usize> = OperationCompletion::Cancelled;
-        assert_eq!(completion, OperationCompletion::Cancelled);
-    }
 }

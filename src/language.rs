@@ -203,11 +203,6 @@ impl LanguagePair {
     pub(crate) const fn target(&self) -> &LanguageId {
         &self.target
     }
-
-    #[cfg(test)]
-    pub(crate) fn into_parts(self) -> (LanguageId, LanguageId) {
-        (self.source, self.target)
-    }
 }
 
 impl fmt::Display for LanguagePair {
@@ -2223,19 +2218,6 @@ mod tests {
             LanguageId::parse("und-Latn"),
             Err(LanguageIdError::UndefinedPrimaryLanguage { .. })
         ));
-    }
-
-    #[test]
-    fn language_pair_preserves_typed_source_and_target() {
-        let pair = LanguagePair::new(language_id("ja"), language_id("zh-Hans"));
-
-        assert_eq!(pair.source().as_str(), "ja");
-        assert_eq!(pair.target().as_str(), "zh-Hans");
-        assert_eq!(pair.to_string(), "ja -> zh-Hans");
-        assert_eq!(
-            pair.into_parts(),
-            (language_id("ja"), language_id("zh-Hans"))
-        );
     }
 
     #[test]

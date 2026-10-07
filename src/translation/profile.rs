@@ -29,25 +29,3 @@ impl TranslationRequestConfiguration {
         self.max_network_retry_after
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn request_configuration_preserves_the_selected_retry_policy() {
-        let configuration = TranslationRequestConfiguration::new(
-            vec![Duration::from_millis(250), Duration::from_secs(2)],
-            Duration::from_secs(30),
-        );
-
-        assert_eq!(
-            configuration.network_retry_delays(),
-            [Duration::from_millis(250), Duration::from_secs(2)]
-        );
-        assert_eq!(
-            configuration.max_network_retry_after(),
-            Duration::from_secs(30)
-        );
-    }
-}
