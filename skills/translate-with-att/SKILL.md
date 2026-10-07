@@ -45,6 +45,10 @@ RPG Developer Bakin 项目通过外部适配器接入 Generic，或汉化后出�
 [TyranoScript／Electron ASAR 经验](references/engine-tyrano-electron-asar.md)，
 补充显示消费者、Generic 映射、标签拓扑、字体、流式回填和独立补丁的检查。
 
+Unity / Naninovel 项目通过 Generic 接入，或资源已译而自定义标题、状态、弹窗仍显示原文时，读取
+[Unity / Naninovel 显示消费者与漏翻返修](references/engine-unity-naninovel-consumers.md)，
+核对脚本与序列化界面、托管字段赋值及静态缓存、有效资源和原生调用的验证边界。
+
 ## 1. 调查
 
 建立声明范围内的可见非图片文本清单，记录每类文本的来源、游戏消费者、上下文、写回位置和
