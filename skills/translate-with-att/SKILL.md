@@ -37,9 +37,9 @@ Kirikiri / KAG / TJS 项目通过 Generic 接入，或汉化后出现标题与�
 读取 [Kirikiri 显示消费者与补丁加载经验](references/engine-kirikiri-kag-tjs.md)，
 核对显示与内部身份、实际加载入口、动态表达式及游戏侧回填；该指引不表示 ATT 原生支持此引擎。
 
-RPG Developer Bakin 项目通过外部适配器接入 Generic 时，读取
+RPG Developer Bakin 项目通过外部适配器接入 Generic，或汉化后出现数值空白、字体模糊与布局越界时，读取
 [Bakin 原生资源往返与播放器消费者](references/engine-bakin-native-roundtrip.md)，
-补充二进制目录、控制码、窗口标题、原生菜单和内嵌字体的调查与验证。
+补充二进制目录、命名变量、窗口标题、原生菜单、字体绑定和布局字段的调查与验证。
 
 发现 TyranoScript 场景与 Electron `app.asar` 容器时，读取
 [TyranoScript／Electron ASAR 经验](references/engine-tyrano-electron-asar.md)，
