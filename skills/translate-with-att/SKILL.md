@@ -12,7 +12,7 @@ description: 使用已打包 ATT 完成 RPG Maker MV、MZ、Generic 或组合项
 ATT 负责确定性提取、状态、模型任务、译文验收和写回；Agent 负责调查文本来源、确定所有者、
 制作术语、审校译文和处理游戏特有内容。命令、格式和状态以实际 `att.exe` 同目录的现行文档为准。
 
-常规游戏翻译任务中，Formic 原则上只用于从原文初筛术语候选；术语校验、定译、最终术语表核对
+常规游戏翻译任务中，Formic 负责从原文初筛术语候选；最终筛选、术语校验、定译、术语表核对
 和译文语义审校由当前负责翻译的 Agent 直接完成。用户明确指定 Formic 的其他用途时，按其具体
 要求执行。
 
@@ -115,9 +115,9 @@ Manual，并用新语料更新术语和后续 QA。
 
 ## 3. 术语
 
-读取[游戏术语表制作 Skill](../extract-game-terminology/SKILL.md)，由当前 Agent 从完整 Manual
-制作并核对最终 `terminology.toml`。Formic 可选初筛原文候选；候选的筛选、全部出现位置与上下文
-的校验、去重、统一定译和最终文件核对都由当前 Agent 自己完成，再交给 ATT `translate --terms`。
+读取[游戏术语表制作 Skill](../extract-game-terminology/SKILL.md)，由 Formic 从完整 Manual
+初筛原文术语候选。候选的最终筛选、全部出现位置与上下文的校验、去重、统一定译和最终
+`terminology.toml` 核对都由当前 Agent 自己完成，再交给 ATT `translate --terms`。
 
 ## 4. Translate
 
