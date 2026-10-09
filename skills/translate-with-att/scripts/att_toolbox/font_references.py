@@ -26,7 +26,7 @@ from att_skill_tools import ToolError, fail, safe_walk_files, toml_string
 from att_toolbox.font_metadata import FontCoverage, check_font_coverage
 from att_toolbox.font_transaction import ByteMutation, sha256_bytes
 from att_toolbox.js import JavaScriptLiteral, loader_call_for_literal, scan_javascript, static_code_targets
-from att_toolbox.rpg import plugin_script_path, read_plugins, resolve_main_html
+from att_toolbox.rpg import parse_plugins, plugin_script_path, read_plugins, resolve_main_html
 
 FONT_SUFFIXES = frozenset({".eot", ".otf", ".ttf", ".woff", ".woff2"})
 _SCANNED_TEXT_SUFFIXES = frozenset(
@@ -164,6 +164,16 @@ class _TextPatch:
     original: str
     replacement: str
     references: tuple[FontReference, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PluginFontBindings:
+    source: Path
+    aliases: tuple[FontAlias, ...]
+    protected_families: frozenset[str]
+    patches: tuple[_TextPatch, ...]
+    handled_literals: frozenset[int]
+    reviews: tuple[ReviewItem, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -993,6 +1003,7 @@ def _discover_aliases(
     assets: Sequence[FontAsset],
     runtime_javascript: frozenset[Path],
     asset_index: _AssetIndex | None = None,
+    plugin_bindings: _PluginFontBindings | None = None,
 ) -> tuple[tuple[FontAlias, ...], dict[str, _AliasTarget], list[ReviewItem]]:
     """从字体资产 stem、@font-face 和静态加载 API 建立别名到资产的证明图。"""
 
@@ -1000,6 +1011,11 @@ def _discover_aliases(
     reviews: list[ReviewItem] = []
     registered_families: set[str] = set()
     indexed_assets = _index_assets(assets) if asset_index is None else asset_index
+    if plugin_bindings is not None:
+        registered_families.update(plugin_bindings.protected_families)
+        facts.extend(
+            (alias, indexed_assets.by_relative[alias.asset.casefold()]) for alias in plugin_bindings.aliases
+        )
     for asset in assets:
         stem = Path(asset.relative_path).stem
         if stem:
@@ -1117,9 +1133,9 @@ def _discover_aliases(
                 if loader_match is None:
                     continue
                 loader = loader_match.group("loader")
+                if alias_literal.value:
+                    registered_families.add(alias_literal.value.casefold())
                 if loader.endswith("FontFace"):
-                    if alias_literal.value:
-                        registered_families.add(alias_literal.value.casefold())
                     source_lexical = _css_lexical_views(asset_literal.value)
                     source_urls, source_unparsed = _css_url_matches(source_lexical)
                     fontface_assets: dict[str, FontAsset] = {}
@@ -1235,7 +1251,8 @@ def _discover_aliases(
         mapping[normalized] = _AliasTarget(
             asset=candidates[0][1],
             preserve_value=any(
-                alias.basis in {"css_font_face", "javascript_font_loader"} for alias, _asset in candidates
+                alias.basis in {"css_font_face", "javascript_font_loader", "plugin_font_loader"}
+                for alias, _asset in candidates
             ),
         )
         accepted.extend(candidate[0] for candidate in candidates)
@@ -2058,6 +2075,144 @@ def _map_nested_patches_to_outer(
     return tuple(result)
 
 
+def _comma_font_items(value: str) -> tuple[tuple[str, int, int], ...]:
+    """按加载器的 split(',')/trim() 保留每项在参数字符串中的位置。"""
+
+    items: list[tuple[str, int, int]] = []
+    offset = 0
+    for part in value.split(","):
+        leading = len(part) - len(part.lstrip())
+        item = part.strip()
+        items.append((item, offset + leading, offset + leading + len(item)))
+        offset += len(part) + 1
+    return tuple(items)
+
+
+def _plugin_font_bindings(
+    *,
+    game_root: Path,
+    content_root: Path,
+    asset_index: _AssetIndex,
+    runtime_javascript: frozenset[Path],
+    selected_name: str,
+) -> _PluginFontBindings:
+    """按活动 YEP_LoadCustomFonts 的公开契约解析配对参数，不猜测其他插件的列表语法。"""
+
+    source = content_root / "js" / "plugins.js"
+    text, _bom = _decode_utf8(source.read_bytes())
+    plugins = tuple(
+        plugin
+        for plugin in parse_plugins(text, "js/plugins.js")
+        if plugin.status and plugin.name.casefold() == "yep_loadcustomfonts"
+    )
+    if not plugins:
+        return _PluginFontBindings(source, (), frozenset(), (), frozenset(), ())
+    relative = source.relative_to(game_root).as_posix()
+    line_index = _LineIndex.for_text(text)
+    code = scan_javascript(text).code
+    declaration = re.search(r"\bvar\s+\$plugins\s*=\s*", code)
+    if declaration is None:
+        raise ValueError("已验证的 plugins.js 缺少 $plugins 声明")
+    offset = declaration.end()
+    tokens = _JsonTokenParser(text[offset : code.rfind(";")]).parse()
+    parameters = {
+        token.path: replace(token, start=token.start + offset, end=token.end + offset) for token in tokens
+    }
+    aliases: list[FontAlias] = []
+    protected_families: set[str] = set()
+    patches: list[_TextPatch] = []
+    handled_literals: set[int] = set()
+    reviews: list[ReviewItem] = []
+    try:
+        entry = resolve_main_html(game_root, (game_root, content_root))
+    except (OSError, ToolError):
+        entry = None
+    for plugin in plugins:
+        filenames = parameters.get((plugin.index, "parameters", "Font Filenames"))
+        families = parameters.get((plugin.index, "parameters", "Font Families"))
+        for token in (filenames, families):
+            if token is not None:
+                handled_literals.add(token.start)
+        family_items = _comma_font_items(families.value) if families is not None else ()
+        protected_families.update(value.casefold() for value, _start, _end in family_items if value)
+        script = content_root / "js" / "plugins" / f"{plugin.name}.js"
+        if script.resolve(strict=False) not in runtime_javascript:
+            # 缺失脚本已经由运行入口调查报告；不能用潜在 family 的文件 stem 反向推断改名。
+            continue
+        if entry is None:
+            reviews.append(ReviewItem(relative, None, "unresolved_plugin_font_loader_entry", plugin.name))
+            continue
+        filename_items = _comma_font_items(filenames.value) if filenames is not None else ()
+        if (
+            filenames is None
+            or families is None
+            or len(filename_items) != len(family_items)
+            or any(not value for value, _start, _end in (*filename_items, *family_items))
+        ):
+            reviews.append(ReviewItem(relative, None, "invalid_plugin_font_loader_lists", plugin.name))
+            continue
+        decoded_patches: list[_TextPatch] = []
+        for number, ((filename, start, end), (family, _family_start, _family_end)) in enumerate(
+            zip(filename_items, family_items, strict=True), start=1
+        ):
+            # 加载器在实际 HTML 入口目录下拼接 /fonts/，不能借用其他目录的同名字体。
+            encoded_path, _suffix = _path_without_suffix(filename)
+            normalized = unquote(encoded_path).replace("\\", "/")
+            asset = None
+            if ":" not in normalized and not normalized.startswith("/"):
+                target = (entry.parent / "fonts" / normalized).resolve(strict=False)
+                if target.is_relative_to(game_root):
+                    asset = asset_index.by_relative.get(target.relative_to(game_root).as_posix().casefold())
+            if asset is None:
+                reviews.append(
+                    ReviewItem(
+                        relative,
+                        line_index.line(filenames.start),
+                        "unresolved_plugin_font_loader_asset",
+                        filename,
+                    )
+                )
+                continue
+            replacement = _new_url_value(filename, selected_name)
+            aliases.append(
+                FontAlias(
+                    family,
+                    asset.relative_path,
+                    "plugin_font_loader",
+                    relative,
+                    line_index.line(families.start),
+                )
+            )
+            reference = _reference(
+                source_relative=relative,
+                line=line_index.line(filenames.start),
+                context="plugin_font_loader_asset",
+                asset=asset,
+                selected_name=selected_name,
+                old_value=filename,
+                new_value=replacement,
+                nested_location=f"$[{plugin.index}].parameters.Font Filenames[{number}]",
+            )
+            decoded_patches.append(_TextPatch(start, end, filename, replacement, (reference,)))
+        patches.extend(
+            _map_nested_patches_to_outer(
+                raw_token=text[filenames.start : filenames.end],
+                decoded=filenames.value,
+                token_start=filenames.start,
+                syntax="json",
+                nested=decoded_patches,
+            )
+        )
+    return _PluginFontBindings(
+        source,
+        tuple(aliases),
+        frozenset(protected_families),
+        tuple(patches),
+        frozenset(handled_literals),
+        tuple(reviews),
+    )
+
+
 def _javascript_string(value: str, quote: str) -> str:
     escapes = {"\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\v": "\\v"}
     result = [quote]
@@ -2397,6 +2552,7 @@ def _scan_javascript(
     selected_name: str,
     asset_index: _AssetIndex | None = None,
     alias_matcher: _AliasMatcher | None = None,
+    handled_literals: frozenset[int] = frozenset(),
 ) -> tuple[list[_TextPatch], list[ReviewItem]]:
     relative = path.relative_to(game_root).as_posix()
     scan = scan_javascript(text)
@@ -2408,6 +2564,8 @@ def _scan_javascript(
     patches: list[_TextPatch] = []
     reviews: list[ReviewItem] = []
     for literal in scan.literals:
+        if literal.start in handled_literals:
+            continue
         if literal.kind != "string" or literal.start is None or literal.end is None or literal.quote is None:
             if _FONT_WORD.search(literal.value):
                 reviews.append(
@@ -3159,6 +3317,13 @@ def build_font_plan(
         content_root=content_root,
         files=files,
     )
+    plugin_bindings = _plugin_font_bindings(
+        game_root=game_root,
+        content_root=content_root,
+        asset_index=asset_index,
+        runtime_javascript=runtime_javascript,
+        selected_name=selected_name,
+    )
     aliases, alias_mapping, alias_reviews = _discover_aliases(
         game_root=game_root,
         content_root=content_root,
@@ -3166,10 +3331,11 @@ def build_font_plan(
         assets=assets,
         runtime_javascript=runtime_javascript,
         asset_index=asset_index,
+        plugin_bindings=plugin_bindings,
     )
     alias_matcher = _AliasMatcher.for_aliases(alias_mapping)
     references: list[FontReference] = []
-    reviews: list[ReviewItem] = [*runtime_reviews, *alias_reviews]
+    reviews: list[ReviewItem] = [*runtime_reviews, *plugin_bindings.reviews, *alias_reviews]
     if coverage.unattached_variation_selectors:
         reviews.append(
             ReviewItem(
@@ -3247,7 +3413,12 @@ def build_font_plan(
                 selected_name=selected_name,
                 asset_index=asset_index,
                 alias_matcher=alias_matcher,
+                handled_literals=(
+                    plugin_bindings.handled_literals if path == plugin_bindings.source else frozenset()
+                ),
             )
+            if path == plugin_bindings.source:
+                patches.extend(plugin_bindings.patches)
         elif suffix == ".css":
             patches, found_reviews = _scan_css(
                 path,
