@@ -4,13 +4,13 @@ Formic 按调用方提供的计划执行独立单元。每个单元由一个 wor
 
 ## 1. 安装与启动条件
 
-从源码构建需要 Rust 1.88 或更高版本：
+ATT 已在本工具目录提供 Windows x64 的 `formic.exe`。在该目录打开 PowerShell 后确认程序可用：
 
-```bash
-cargo build --release
+```powershell
+.\formic.exe --help
 ```
 
-Windows 产物位于 `target/release/formic.exe`。仓库中的 `dist/` 是本机发布目录，被 Git 忽略，不是源码的一部分。
+下文的 PowerShell 示例均从本工具目录调用 `formic.exe`，输入路径替换为自己的任务目录。源码构建需要独立的 Formic 工程，入口和精确提交见[来源记录](../FORMIC-SOURCE.md)。
 
 一次作业至少需要：
 
@@ -23,7 +23,7 @@ Windows 产物位于 `target/release/formic.exe`。仓库中的 `dist/` 是本�
 
 ## 2. 最小配置
 
-复制根目录的 `config.example.toml` 为自己的 `config.toml`，填写模型信息。不要提交真实密钥。
+编辑本工具目录已有的 `config.toml`，填写模型信息；文件缺失时才复制同目录的 `config.example.toml` 创建。活动配置保存操作者的选择和凭据，普通更新保留原内容。勿提交或公开分享真实密钥。
 
 ```toml
 protocol = "completions"
@@ -148,8 +148,8 @@ User-Agent 使用 Formic 的实际身份，会话标识由操作者指定，并�
 
 ### 2.5 验证配置与连接
 
-```bash
-formic test --config config.toml
+```powershell
+.\formic.exe test --config .\config.toml
 ```
 
 `test` 按以下顺序输出逐项结果：
@@ -203,14 +203,8 @@ LLM 或某个 MCP 失败时，命令继续检查后续 server，最后返回汇�
 
 ## 5. 运行作业
 
-```bash
-formic run \
-  --data data \
-  --plan plan.jsonl \
-  --task task.md \
-  --out out \
-  --worker-output-access none \
-  --config config.toml
+```powershell
+.\formic.exe run --data data --plan plan.jsonl --task task.md --out out --worker-output-access none --config .\config.toml
 ```
 
 参数说明：
@@ -299,15 +293,8 @@ Streamable HTTP 有一项底层限制：initialize 超时会让 Formic 按配置
 
 传入 JSON Schema 后启用结构化模式：
 
-```bash
-formic run \
-  --data data \
-  --plan plan.jsonl \
-  --task task.md \
-  --out out \
-  --worker-output-access none \
-  --config config.toml \
-  --output-schema result.schema.json
+```powershell
+.\formic.exe run --data data --plan plan.jsonl --task task.md --out out --worker-output-access none --config .\config.toml --output-schema result.schema.json
 ```
 
 Formic 接受一个明确的 JSON Schema 子集：
@@ -359,15 +346,8 @@ Formic 为模型增加内部 `formic_submit_result`，只有通过本地校验�
 
 作业中断或部分失败后，使用相同输入增加 `--resume`：
 
-```bash
-formic run \
-  --data data \
-  --plan plan.jsonl \
-  --task task.md \
-  --out out \
-  --worker-output-access none \
-  --config config.toml \
-  --resume
+```powershell
+.\formic.exe run --data data --plan plan.jsonl --task task.md --out out --worker-output-access none --config .\config.toml --resume
 ```
 
 续跑前会核对：
