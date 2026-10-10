@@ -5,17 +5,17 @@
 | 项目 | 当前制品 |
 | --- | --- |
 | 源码仓库 | [yexi-by/formic](https://github.com/yexi-by/formic) |
-| 源码提交 | `45de311ab266ffa7cc606dffbb7463552a559ede` |
-| 来源状态 | 本机源码仓库已提交，尚未推送远端 |
+| 源码提交 | [`45de311ab266ffa7cc606dffbb7463552a559ede`](https://github.com/yexi-by/formic/commit/45de311ab266ffa7cc606dffbb7463552a559ede) |
+| 来源状态 | 已公开推送至源码仓库 |
 | 编译器 | Rust 1.97.1 |
 | 构建目标 | `x86_64-pc-windows-msvc`，Release，静态 C Runtime |
 | `formic.exe` SHA-256 | `1cfd69619d166214dc003aff972ea7419a72984cc029eadff478b08816282dd8` |
 
-当前修订的精确源码保存在本机 Formic 源码仓库的上述提交中；上游远端尚未包含本次修订。
+当前修订的精确源码可通过上表源码提交获取。
 
 ## 从对应源码构建
 
-源码构建和规模实验在独立的 Formic 源码工程中执行。在持有上述提交的源码仓库中，检出该提交后运行：
+源码构建和规模实验在独立的 Formic 源码工程中执行。取得上述提交后，在其根目录运行：
 
 ```powershell
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
