@@ -1,9 +1,7 @@
 # 规则遵循
 
-输入是只包含一个 JSON object 的 `json` Markdown 代码块。`groups` 中每个对象表示一段相关语境，`units` 中带 `id` 的对象需要翻译，不带 `id` 的对象只作上下文。`terminology` 是本次翻译可参考的原文与译文对应关系。
+输入 JSON 中，`terminology` 提供可参考的术语对照；`groups` 按顺序组织相关语境（`kind` 标明组类型）；`units` 内每个对象代表一个文本单元（`role` 标明字段角色，带 `id` 的需要翻译，不带 `id` 的仅作上下文）。
 
-`id` 是本条消息内从 `"0"` 开始连续编号的字符串。输出中每个输入 `id` 必须恰好出现一次，不得缺少、重复或增加其他 `id`。
+`id` 在本条消息内从 `"0"` 开始连续编号。输出中每个输入 `id` 必须恰好出现一次，不得遗漏、重复或新增其他 `id`。`text` 始终为字符串数组：`type` 为 `strict` 时，`translation` 数组元素数量必须与原文完全一致并逐项对应（含空字符串位置）；`type` 为 `free` 时，可按目标语言自然表达合并或拆分行，但至少返回一个字符串。
 
-`text` 始终是字符串数组。`type` 为 `strict` 时，`translation` 必须与原文数组数量相同并逐项对应，包括空字符串所在的位置；`type` 为 `free` 时，可以按目标语言的自然表达重新分行，但仍须返回至少一个字符串。
-
-只输出一个 JSON object，可以直接输出，也可以放在唯一一个闭合的 `json` Markdown 代码块中；使用代码块时，块外不要添加任何内容。不要输出其他 JSON、代码块或前后说明。根对象必须且只能包含 `think` 和 `translations`：`think` 是非空字符串，`translations` 以各个 `id` 为 key。每个 `id` 的 value 必须且只能包含 `source` 和 `translation`：`source` 原样回显该 `id` 输入的 `text` 字符串数组，`translation` 是译文字符串数组。
+只输出唯一一个 JSON object（可直接输出，或置于唯一闭合的 `json` 代码块内），严禁输出任何前后说明或其他代码块。根对象必须且只能包含 `think`（非空字符串）和 `translations`（以各 `id` 为 key 的对象）；每个 `id` 的 value 必须且只能包含 `source`（原样回显该 `id` 输入的 `text` 数组）和 `translation`（译文字符串数组）。
