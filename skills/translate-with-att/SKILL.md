@@ -1,6 +1,6 @@
 ---
 name: translate-with-att
-description: 使用已打包 ATT 完成 RPG Maker MV、MZ、Generic 或组合项目的游戏翻译，从可见文本调查、Extract、术语、Translate、QA、WriteBack 一直到中文字体与封包，并根据人工实玩反馈继续返修；VX Ace、Ren'Py、Kirikiri、Bakin、TyranoScript、Unity、RealLive、Escude 等引擎经 Generic 接入时同样从本技能进入。
+description: 使用已打包 ATT 完成 RPG Maker MV、MZ、Generic 或组合项目的游戏翻译，从可见文本调查、Extract、术语、Translate、QA、WriteBack 一直到中文字体与封包，并根据人工实玩反馈继续返修；WOLF、VX Ace、Ren'Py、Kirikiri、Bakin、TyranoScript、Unity、RealLive、Escude 等引擎经 Generic 接入时同样从本技能进入。
 ---
 
 # 使用 ATT 完成游戏翻译
@@ -29,6 +29,7 @@ ATT 原生处理 RPG Maker MV、MZ 和 Generic JSONL；其他引擎通过 Generi
 | 情况 | 读取 | 补充内容 |
 | --- | --- | --- |
 | MV 出现混合插件参数、内联姓名控制码、组合写回或大量 QA 候选 | [大型、插件密集的 MV 经验](references/game-type-large-plugin-heavy-mv.md) | 对应问题的处理方法 |
+| WOLF RPG Editor 经外部适配器接入，或出现 NPC 漏翻、数据库查找错误 | [WOLF 条件对话、内部键与原生写回](references/engine-wolf-native-consumers.md) | 条件字段覆盖、内嵌脚本、姓名与动态提示、数据库键及原生读回 |
 | RPG Maker VX Ace／RGSS3 通过 Generic 接入 | [VX Ace 汉化技能](../rpg-maker-vx-ace-localization/SKILL.md) | Marshal、脚本、字体与消息排版 |
 | Ren'Py 通过 Generic JSONL 翻译 | [Ren'Py 汉化技能](../renpy-localization/SKILL.md) | 原生翻译模板、硬编码界面、反向转换、字体与独立补丁 |
 | Kirikiri / KAG / TJS 通过 Generic 接入 | [Kirikiri 显示消费者与补丁加载经验](references/engine-kirikiri-kag-tjs.md) | 显示与内部身份、实际加载入口、动态表达式及游戏侧回填 |
