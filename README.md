@@ -1,6 +1,6 @@
 # ATT
 
-这是一套用编码 Agent（如 Codex）跑通**全游戏汉化**的工具链，运行于 Windows x64。
+这是一套配合 Agent（如 ChatGPT (Codex) 桌面端）跑通**全游戏汉化**的工具链，运行于 Windows x64。
 
 做游戏汉化最麻烦的往往不是调翻译接口，而是前后的杂活：不同引擎的解包封包、从脚本和二进制里抠文本、修控制符、换中文字体、调换行爆框。如果直接让 Agent 在对话上下文里翻译几万句台词，既慢又贵还容易漏行；而传统翻译工具又太死板，遇到没见过的引擎或魔改插件就没法用。
 
@@ -23,7 +23,7 @@
 
 随包附带了完整的操作流（[`skills/translate-with-att/SKILL.md`](skills/translate-with-att/SKILL.md)）和常见引擎的处理经验，Agent 启动后会自己顺着文档往下做。
 
-## 快速开始（以 Codex 为例）
+## 快速开始（以 ChatGPT (Codex) 桌面端为例）
 
 ### 1. 解压发行包
 
@@ -61,7 +61,7 @@ Set-Location 'D:\Tools\ATT'
 
 ### 3. 把汉化任务交给 Codex
 
-按[官方文档](https://learn.chatgpt.com/docs/codex/cli)装好 Codex CLI，在 `D:\Tools\ATT` 目录下运行 `codex` 并完成登录。把下面这段话发给它（记得替换里面的游戏路径和语言）：
+打开 ChatGPT (Codex) 桌面端并完成登录，将工作目录选在 `D:\Tools\ATT`，把下面这段话发给它（记得替换里面的游戏路径和语言）：
 
 ```text
 使用当前目录的 att.exe，将 D:\Games\Example 中正常游玩可见的非图片日语文本翻译为简体中文。
