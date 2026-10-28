@@ -109,11 +109,7 @@ fn build_request_inner(
         .map(|key| ("authorization".to_string(), format!("Bearer {key}")))
         .into_iter()
         .collect();
-    Ok((
-        format!("{}/responses", config.base_url.trim_end_matches('/')),
-        body.to_string(),
-        headers,
-    ))
+    Ok((config.endpoint.clone(), body.to_string(), headers))
 }
 
 fn user_content(
@@ -548,7 +544,7 @@ mod tests {
     fn history_maps_to_input_items() {
         let config = LlmConfig {
             protocol: super::super::Protocol::Responses,
-            base_url: "http://x/v1".into(),
+            endpoint: "http://x/v1/responses".parse().unwrap(),
             model: "m".into(),
             api_key: None,
             context_window_tokens: 131072,
@@ -634,7 +630,7 @@ mod tests {
 
         let config = LlmConfig {
             protocol: super::super::Protocol::Responses,
-            base_url: "http://x/v1".into(),
+            endpoint: "http://x/v1/responses".parse().unwrap(),
             model: "m".into(),
             api_key: None,
             context_window_tokens: 131072,

@@ -46,6 +46,10 @@ metrics = false
 
 `anthropic` 还必须配置正整数 `anthropic_max_tokens`。其他协议出现该字段会直接失败。
 
+`url` 必须是带主机名的完整 HTTP(S) 基础地址。Formic 在配置入口解析地址，并在其路径末尾
+按协议追加 `chat/completions`、`responses` 或 `messages`，保留查询参数。无效地址按配置错误
+退出（退出码 `2`），不会创建作业或连接 MCP；诊断不回显地址内容。
+
 Chat Completions 流中的 `delta.tool_calls` 缺失或为 `null` 时，表示当前帧没有工具调用增量；
 数组中的调用按 `index` 拼接。每条调用的 `id`、`type`、`function`，以及 `function.name` 和
 `function.arguments` 都允许缺失或为 `null`，此时不追加也不清空已经收到的内容。这些字段的

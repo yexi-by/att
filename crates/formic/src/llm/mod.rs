@@ -19,7 +19,7 @@ use futures_util::{Stream, StreamExt};
 
 use crate::image_input::ImageInput;
 
-pub(crate) type BuiltRequest = (String, String, Vec<(String, String)>);
+pub(crate) type BuiltRequest = (reqwest::Url, String, Vec<(String, String)>);
 pub(crate) type BuildRequestResult = Result<BuiltRequest, LlmError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -528,7 +528,7 @@ pub struct LlmClient {
 /// 实际 HTTP body、URL 和 headers 保持私有，不进入档案。
 #[derive(Clone)]
 pub struct PreparedLlmCall {
-    url: String,
+    url: reqwest::Url,
     body: String,
     audit_body: String,
     headers: Vec<(String, String)>,
@@ -561,7 +561,7 @@ impl PreparedLlmCall {
 #[derive(Clone)]
 pub struct LlmConfig {
     pub protocol: Protocol,
-    pub base_url: String,
+    pub endpoint: reqwest::Url,
     pub model: String,
     pub api_key: Option<String>,
     /// 配置边界已校验的自定义请求头，统一用于全部模型协议与调用。
@@ -586,7 +586,7 @@ impl LlmConfig {
     pub(crate) fn test_defaults() -> Self {
         Self {
             protocol: Protocol::Completions,
-            base_url: "http://127.0.0.1".into(),
+            endpoint: "http://127.0.0.1/chat/completions".parse().unwrap(),
             model: "test-model".into(),
             api_key: None,
             headers: reqwest::header::HeaderMap::new(),
@@ -842,7 +842,7 @@ impl LlmClient {
 
         let mut req = self
             .http
-            .post(&prepared.url)
+            .post(prepared.url)
             .headers(self.config.headers.clone())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(prepared.body);
@@ -1614,7 +1614,7 @@ mod tests {
     fn input_budget_only_reserves_anthropic_required_output() {
         let common = LlmConfig {
             protocol: Protocol::Responses,
-            base_url: "http://localhost".into(),
+            endpoint: "http://localhost/responses".parse().unwrap(),
             model: "m".into(),
             api_key: None,
             context_window_tokens: 100_000,

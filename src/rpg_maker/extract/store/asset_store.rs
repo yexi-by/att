@@ -4438,10 +4438,10 @@ mod tests {
 
         let workspace = tempfile::tempdir().expect("应建立大项目工作区");
         let database_path = workspace.path().join("project.db");
-        let mut connection = Connection::open(&database_path).expect("应创建文件项目数据库");
+        let connection = Connection::open(&database_path).expect("应创建文件项目数据库");
         create_current_schema(&connection);
         execute_plan(
-            &mut connection,
+            &connection,
             build_transaction_plan(
                 RpgMakerAssetOwner::Builtin,
                 [0xa5; 32],
@@ -4638,7 +4638,7 @@ mod tests {
         .expect("新快照应可合并");
         assert_ne!(old.fingerprint, new.fingerprint);
 
-        let mut connection = Connection::open_in_memory().expect("应创建内存数据库");
+        let connection = Connection::open_in_memory().expect("应创建内存数据库");
         create_current_schema(&connection);
         seed_snapshot(&connection, &old, r#""译文""#, &[0x44; 32]);
         let previous_rows = PreviousAssetRows {
@@ -4647,7 +4647,7 @@ mod tests {
             rejected: Vec::new(),
         };
         execute_plan(
-            &mut connection,
+            &connection,
             build_transaction_plan(
                 owner,
                 [0xa5; 32],
@@ -4698,7 +4698,7 @@ mod tests {
             None,
         )
         .expect("新快照应可合并");
-        let mut connection = Connection::open_in_memory().expect("应创建内存数据库");
+        let connection = Connection::open_in_memory().expect("应创建内存数据库");
         create_current_schema(&connection);
         seed_snapshot(&connection, &old, r#""旧译文""#, &[0x44; 32]);
         let previous_rows = PreviousAssetRows {
@@ -4708,7 +4708,7 @@ mod tests {
         };
 
         execute_plan(
-            &mut connection,
+            &connection,
             build_transaction_plan(
                 owner,
                 [0xa5; 32],
@@ -4810,7 +4810,7 @@ mod tests {
         );
         let workspace = tempfile::tempdir().expect("应创建测试工作区");
         let database_path = workspace.path().join("project.db");
-        let mut connection = Connection::open(&database_path).expect("应创建测试数据库");
+        let connection = Connection::open(&database_path).expect("应创建测试数据库");
         create_current_schema(&connection);
         seed_snapshot(
             &connection,
@@ -4859,11 +4859,17 @@ mod tests {
         );
         connection
             .execute(
-                "INSERT INTO rpg_maker_manual_translation VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO rpg_maker_manual_translation (
+                    owner, group_location, unit_role, readable_id, translation_type,
+                    source_json, translation_json, applicability_fingerprint
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 (
                     owner.storage_name(),
                     &manual_unit.group_location,
                     &manual_unit.unit_role,
+                    "Items.json:1:description",
+                    crate::manual::rpg_maker_manual_type(&manual_identity).as_str(),
+                    serde_json::to_string(&manual_source_lines).unwrap(),
                     r#"["人工描述"]"#,
                     manual_state.as_bytes().to_vec(),
                 ),
@@ -4901,7 +4907,7 @@ mod tests {
         };
 
         execute_plan(
-            &mut connection,
+            &connection,
             build_transaction_plan(
                 owner,
                 [0xa5; 32],
@@ -5040,20 +5046,20 @@ mod tests {
             None,
         )
         .expect("Builtin 快照应可合并");
+        let mut previous_rules_group = scalar_group(2, "name", "旧 Rules 原文");
+        previous_rules_group.units_mut()[0].set_rule_number(1);
         let previous_rules = EncodedSnapshot::merge(
             RpgMakerAssetOwner::Rules,
-            vec![
-                encode_test_batch(vec![scalar_group(2, "name", "旧 Rules 原文")])
-                    .expect("旧 Rules 快照应可编码"),
-            ],
+            vec![encode_test_batch(vec![previous_rules_group]).expect("旧 Rules 快照应可编码")],
             None,
         )
         .expect("旧 Rules 快照应可合并");
+        let mut conflicting_rules_group = scalar_group(1, "name", "新 Rules 原文");
+        conflicting_rules_group.units_mut()[0].set_rule_number(1);
         let conflicting_rules = EncodedSnapshot::merge(
             RpgMakerAssetOwner::Rules,
             vec![
-                encode_test_batch(vec![scalar_group(1, "name", "新 Rules 原文")])
-                    .expect("冲突 Rules 快照应可编码"),
+                encode_test_batch(vec![conflicting_rules_group]).expect("冲突 Rules 快照应可编码"),
             ],
             None,
         )
@@ -5149,7 +5155,7 @@ mod tests {
         )
         .expect("新快照应合并");
 
-        let mut connection = Connection::open_in_memory().expect("应创建内存数据库");
+        let connection = Connection::open_in_memory().expect("应创建内存数据库");
         create_current_schema(&connection);
         seed_snapshot(&connection, &old, r#""旧译文""#, &[0x44; 32]);
         let previous_rows = read_snapshot_rows(&connection, owner);
@@ -5173,7 +5179,7 @@ mod tests {
             Vec::new(),
         ));
 
-        execute_plan(&mut connection, SqliteTransactionPlan::new(steps))
+        execute_plan(&connection, SqliteTransactionPlan::new(steps))
             .expect_err("索引恢复后的 SQLite 命令失败必须回滚整个事务");
         assert_eq!(
             read_snapshot_rows(&connection, owner),
@@ -5301,9 +5307,9 @@ mod tests {
         let plan = plans[0].1.clone();
         drop(plans);
 
-        let mut connection = Connection::open_in_memory().expect("应创建内存数据库");
+        let connection = Connection::open_in_memory().expect("应创建内存数据库");
         create_current_schema(&connection);
-        execute_plan(&mut connection, plan).expect("定义与资产事务应可整体提交");
+        execute_plan(&connection, plan).expect("定义与资产事务应可整体提交");
         let persisted: String = connection
             .query_row(
                 "SELECT canonical_json FROM rpg_maker_project_definition WHERE definition_kind = 'mv_dialogue_rules'",
@@ -5821,6 +5827,8 @@ mod tests {
         let owner = RpgMakerAssetOwner::Rules;
         let mut natural_first = scalar_group(2, "description", "说明");
         let mut natural_second = scalar_group(1, "name", "名称");
+        natural_first.units_mut()[0].set_rule_number(1);
+        natural_second.units_mut()[0].set_rule_number(2);
         natural_first.set_semantic_order_key(RpgMakerSemanticOrderKey::new(vec![0], 0));
         natural_first.units_mut()[0]
             .set_semantic_order_key(RpgMakerSemanticOrderKey::new(vec![0], 1));
@@ -5836,10 +5844,10 @@ mod tests {
         let expected = snapshot_rows(&snapshot);
         let expected_fingerprint = snapshot.fingerprint;
 
-        let mut connection = Connection::open_in_memory().expect("应创建内存数据库");
+        let connection = Connection::open_in_memory().expect("应创建内存数据库");
         create_current_schema(&connection);
         execute_plan(
-            &mut connection,
+            &connection,
             build_transaction_plan(
                 owner,
                 [0xa5; 32],
@@ -5893,10 +5901,10 @@ mod tests {
         .expect("乱序测试快照应按语义键规范化");
         let workspace = tempfile::tempdir().expect("应建立写回往返测试目录");
         let database_path = workspace.path().join("project.db");
-        let mut connection = Connection::open(&database_path).expect("应创建测试数据库");
+        let connection = Connection::open(&database_path).expect("应创建测试数据库");
         create_current_schema(&connection);
         execute_plan(
-            &mut connection,
+            &connection,
             build_transaction_plan(
                 owner,
                 [0xa5; 32],
@@ -6790,109 +6798,23 @@ ORDER BY name"#,
     }
 
     fn create_current_schema(connection: &Connection) {
+        crate::runtime::sqlite::apply_att_sqlite_read_write_policy(connection)
+            .expect("应应用生产 SQLite 连接策略");
+        crate::rpg_maker::project_database::create_current_rpg_maker_schema_for_test(connection)
+            .expect("应按生产 DDL 建立当前 schema");
         connection
-            .execute_batch(
-                r#"
-                PRAGMA foreign_keys = ON;
-                PRAGMA journal_mode = WAL;
-                PRAGMA synchronous = FULL;
-                CREATE TABLE metadata (
-                    source_snapshot_fingerprint BLOB NOT NULL
-                );
-                INSERT INTO metadata VALUES (
-                    X'A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5'
-                );
-                CREATE TABLE rpg_maker_asset_owner_state (
-                    owner TEXT PRIMARY KEY,
-                    source_snapshot_fingerprint BLOB NOT NULL,
-                    asset_snapshot_fingerprint BLOB NOT NULL
-                );
-                CREATE TABLE rpg_maker_project_definition (
-                    definition_kind TEXT PRIMARY KEY,
-                    canonical_json TEXT NOT NULL
-                );
-                INSERT INTO rpg_maker_project_definition VALUES (
-                    'mv_dialogue_rules',
-                    '{"rules":[]}'
-                );
-                CREATE TABLE rpg_maker_translation_resource (
-                    resource_kind TEXT PRIMARY KEY,
-                    canonical_json TEXT NOT NULL
-                );
-                INSERT INTO rpg_maker_translation_resource VALUES ('terminology', '[]');
-                INSERT INTO rpg_maker_translation_resource VALUES ('placeholder_rules', '[]');
-                INSERT INTO rpg_maker_translation_resource VALUES ('write_back_layout_rules', '[]');
-                CREATE TABLE rpg_maker_text_group (
-                    owner TEXT NOT NULL,
-                    group_id INTEGER NOT NULL CHECK (group_id > 0),
-                    group_location TEXT NOT NULL,
-                    semantic_order_key BLOB NOT NULL,
-                    group_kind TEXT NOT NULL,
-                    projection_recipe_json TEXT NOT NULL,
-                    PRIMARY KEY (owner, group_id),
-                    UNIQUE (owner, group_location),
-                    UNIQUE (owner, semantic_order_key),
-                    FOREIGN KEY (owner) REFERENCES rpg_maker_asset_owner_state(owner) ON DELETE CASCADE
-                );
-                CREATE TABLE rpg_maker_text_unit (
-                    owner TEXT NOT NULL,
-                    group_id INTEGER NOT NULL CHECK (group_id > 0),
-                    unit_role TEXT NOT NULL,
-                    rule_number INTEGER,
-                    semantic_order_key BLOB NOT NULL,
-                    source_content_json TEXT NOT NULL,
-                    source_context_json TEXT NOT NULL,
-                    translation_content_json TEXT,
-                    translation_state BLOB,
-                    PRIMARY KEY (owner, group_id, unit_role),
-                    UNIQUE (owner, semantic_order_key),
-                    FOREIGN KEY (owner, group_id)
-                        REFERENCES rpg_maker_text_group(owner, group_id) ON DELETE CASCADE
-                );
-                CREATE INDEX rpg_maker_text_unit_owner_group_order_idx
-                    ON rpg_maker_text_unit(owner, group_id, semantic_order_key);
-                CREATE TABLE rpg_maker_manual_translation (
-                    owner TEXT NOT NULL,
-                    group_location TEXT NOT NULL,
-                    unit_role TEXT NOT NULL,
-                    translation_json TEXT,
-                    applicability_fingerprint BLOB,
-                    PRIMARY KEY (owner, group_location, unit_role)
-                );
-                CREATE TABLE rpg_maker_rejected_translation (
-                    owner TEXT NOT NULL,
-                    group_id INTEGER NOT NULL CHECK (group_id > 0),
-                    unit_role TEXT NOT NULL,
-                    readable_id TEXT NOT NULL,
-                    origin TEXT NOT NULL,
-                    source_content_json TEXT NOT NULL,
-                    source_context_json TEXT NOT NULL,
-                    candidate_json TEXT NOT NULL,
-                    translation_json TEXT,
-                    violation_json TEXT NOT NULL,
-                    planning_state BLOB NOT NULL,
-                    PRIMARY KEY (owner, group_id, unit_role),
-                    FOREIGN KEY (owner, group_id, unit_role)
-                        REFERENCES rpg_maker_text_unit(owner, group_id, unit_role) ON DELETE CASCADE
-                );
-                CREATE TABLE rpg_maker_mutation_claim (
-                    owner TEXT NOT NULL,
-                    group_id INTEGER NOT NULL CHECK (group_id > 0),
-                    resource_key TEXT NOT NULL,
-                    access TEXT NOT NULL CHECK (access IN ('intent', 'exclusive')),
-                    PRIMARY KEY (owner, group_id, resource_key),
-                    FOREIGN KEY (owner, group_id)
-                        REFERENCES rpg_maker_text_group(owner, group_id) ON DELETE CASCADE
-                );
-                "#,
+            .execute(
+                "INSERT INTO metadata (name, source_language, target_language, source_snapshot_fingerprint)
+                 VALUES ('demo', 'ja', 'zh-Hans', ?1)",
+                [vec![0xa5; 32]],
             )
-            .expect("当前测试 schema 应创建成功");
+            .expect("测试项目事实应写入");
         connection
-            .execute(CREATE_RPG_MAKER_MUTATION_CLAIM_RESOURCE_INDEX, [])
-            .expect("Claim resource 索引应按生产 DDL 创建");
-        connection
-            .execute(CREATE_RPG_MAKER_MUTATION_CLAIM_OWNER_RESOURCE_INDEX, [])
-            .expect("Claim owner/resource 索引应按生产 DDL 创建");
+            .execute(
+                "INSERT INTO rpg_maker_project_definition VALUES ('mv_dialogue_rules', ?1)",
+                [MvDialogueDefinition::empty().to_canonical_json().unwrap()],
+            )
+            .expect("测试项目定义应写入");
     }
 
     fn seed_snapshot(
@@ -6961,107 +6883,14 @@ ORDER BY name"#,
     }
 
     fn execute_plan(
-        connection: &mut Connection,
+        connection: &Connection,
         plan: SqliteTransactionPlan,
-    ) -> Result<(), String> {
-        let transaction = connection
-            .transaction()
-            .map_err(|error| error.to_string())?;
-        for step in plan.steps() {
-            match step {
-                SqliteTransactionStep::Execute(command) => {
-                    transaction
-                        .execute(
-                            command.statement(),
-                            params_from_iter(command.parameters().iter().map(to_rusqlite_value)),
-                        )
-                        .map_err(|error| error.to_string())?;
-                }
-                SqliteTransactionStep::ExecuteMany(batch) => {
-                    let mut statement = transaction
-                        .prepare(batch.statement())
-                        .map_err(|error| error.to_string())?;
-                    for parameters in batch.parameter_rows() {
-                        statement
-                            .execute(params_from_iter(
-                                batch
-                                    .shared_parameters()
-                                    .iter()
-                                    .chain(parameters)
-                                    .map(to_rusqlite_value),
-                            ))
-                            .map_err(|error| error.to_string())?;
-                    }
-                }
-                SqliteTransactionStep::ExecuteManyExactlyOne(batch) => {
-                    let mut statement = transaction
-                        .prepare(batch.statement())
-                        .map_err(|error| error.to_string())?;
-                    for parameters in batch.parameter_rows() {
-                        let affected = statement
-                            .execute(params_from_iter(
-                                batch
-                                    .shared_parameters()
-                                    .iter()
-                                    .chain(parameters)
-                                    .map(to_rusqlite_value),
-                            ))
-                            .map_err(|error| error.to_string())?;
-                        if affected != 1 {
-                            return Err(format!(
-                                "exactly-one requirement failed: affected {affected} rows"
-                            ));
-                        }
-                    }
-                }
-                SqliteTransactionStep::RequireNoRows(query) => {
-                    let mut statement = transaction
-                        .prepare(query.statement())
-                        .map_err(|error| error.to_string())?;
-                    let mut rows = statement
-                        .query(params_from_iter(
-                            query.parameters().iter().map(to_rusqlite_value),
-                        ))
-                        .map_err(|error| error.to_string())?;
-                    if rows.next().map_err(|error| error.to_string())?.is_some() {
-                        return Err("requirement failed".to_owned());
-                    }
-                }
-                SqliteTransactionStep::RequireNoRowsReturningFirstRow(query) => {
-                    let mut statement = transaction
-                        .prepare(query.statement())
-                        .map_err(|error| error.to_string())?;
-                    let mut rows = statement
-                        .query(params_from_iter(
-                            query.parameters().iter().map(to_rusqlite_value),
-                        ))
-                        .map_err(|error| error.to_string())?;
-                    if rows.next().map_err(|error| error.to_string())?.is_some() {
-                        return Err("requirement failed with diagnostic row".to_owned());
-                    }
-                }
-                SqliteTransactionStep::RequireNoRowsMany(batch) => {
-                    let mut statement = transaction
-                        .prepare(batch.statement())
-                        .map_err(|error| error.to_string())?;
-                    for parameters in batch.parameter_rows() {
-                        let mut rows = statement
-                            .query(params_from_iter(
-                                batch
-                                    .shared_parameters()
-                                    .iter()
-                                    .chain(parameters)
-                                    .map(to_rusqlite_value),
-                            ))
-                            .map_err(|error| error.to_string())?;
-                        if rows.next().map_err(|error| error.to_string())?.is_some() {
-                            return Err("requirement failed".to_owned());
-                        }
-                    }
-                }
-            }
-        }
-        transaction.commit().map_err(|error| error.to_string())
+    ) -> Result<(), ExecuteTransactionError<crate::runtime::sqlite::SqliteRuntimeError>> {
+        crate::runtime::sqlite::run_transaction_on_connection(
+            connection,
+            &plan,
+            &crate::runtime::performance::RunPerformanceCounters::default(),
+        )
     }
 
     #[test]
@@ -7159,15 +6988,5 @@ ORDER BY name"#,
         assert!(serialized.contains("Items.json"));
         assert!(serialized.contains("outcome_unknown"));
         assert!(!serialized.contains("[\\\"v\\\""));
-    }
-
-    fn to_rusqlite_value(value: &SqliteValue) -> RusqliteValue {
-        match value {
-            SqliteValue::Null => RusqliteValue::Null,
-            SqliteValue::Integer(value) => RusqliteValue::Integer(*value),
-            SqliteValue::Real(value) => RusqliteValue::Real(*value),
-            SqliteValue::Text(value) => RusqliteValue::Text(value.clone()),
-            SqliteValue::Blob(value) => RusqliteValue::Blob(value.clone()),
-        }
     }
 }

@@ -333,6 +333,16 @@ pub enum BuiltinTool {
     ReadImage,
 }
 
+pub struct PreparedBuiltinCall {
+    operation: BuiltinOperation,
+}
+
+enum BuiltinOperation {
+    Search(SearchToolConfig, SearchArgs),
+    Read(ReadToolConfig, ReadArgs),
+    ReadImage(PathBuf),
+}
+
 pub struct BuiltinRegistration {
     pub spec: ToolSpec,
     pub executor: BuiltinTool,
@@ -355,7 +365,7 @@ impl ToolOutput {
         }
     }
 
-    fn error(message: impl std::fmt::Display) -> Self {
+    pub fn error(message: impl std::fmt::Display) -> Self {
         Self {
             content: format!("错误：{message}"),
             images: Vec::new(),
@@ -482,48 +492,54 @@ fn read_spec(output_access: WorkerOutputAccess) -> ToolSpec {
 }
 
 impl BuiltinTool {
-    pub fn canonical_cache_key(&self, arguments: &Value) -> Option<String> {
-        match self {
-            Self::Search(config) => parse_search(arguments, config)
-                .ok()
-                .filter(|args| args.scope == Scope::Input)
-                .map(|args| serde_json::to_string(&args.canonical()).expect("规范参数可序列化")),
-            Self::Read(_) => parse_read(arguments)
-                .ok()
-                .filter(|args| args.scope == Scope::Input)
-                .map(|args| serde_json::to_string(&args.canonical()).expect("规范参数可序列化")),
-            Self::ReadImage => None,
-        }
+    pub fn prepare(&self, arguments: &Value) -> Result<PreparedBuiltinCall, String> {
+        let operation = match self {
+            Self::Search(config) => {
+                BuiltinOperation::Search(config.clone(), parse_search(arguments, config)?)
+            }
+            Self::Read(config) => BuiltinOperation::Read(config.clone(), parse_read(arguments)?),
+            Self::ReadImage => BuiltinOperation::ReadImage(parse_read_image(arguments)?),
+        };
+        Ok(PreparedBuiltinCall { operation })
     }
 
     #[cfg(test)]
     pub fn execute(&self, roots: &Roots, arguments: &Value) -> ToolOutput {
-        self.execute_cancellable(roots, arguments, &CancellationToken::new())
+        match self.prepare(arguments) {
+            Ok(call) => call.execute_cancellable(roots, &CancellationToken::new()),
+            Err(message) => ToolOutput::error(message),
+        }
+    }
+}
+
+impl PreparedBuiltinCall {
+    pub fn canonical_cache_key(&self) -> Option<String> {
+        let arguments = match &self.operation {
+            BuiltinOperation::Search(_, args) if args.scope == Scope::Input => args.canonical(),
+            BuiltinOperation::Read(_, args) if args.scope == Scope::Input => args.canonical(),
+            _ => return None,
+        };
+        Some(serde_json::to_string(&arguments).expect("规范参数可序列化"))
     }
 
-    pub fn execute_cancellable(
-        &self,
-        roots: &Roots,
-        arguments: &Value,
-        cancel: &CancellationToken,
-    ) -> ToolOutput {
-        match self {
-            Self::Search(config) => match parse_search(arguments, config) {
-                Ok(args) => search(roots, config, &args, cancel).unwrap_or_else(ToolOutput::error),
-                Err(message) => ToolOutput::error(message),
-            },
-            Self::Read(config) => match parse_read(arguments) {
-                Ok(args) => read(roots, config, &args, cancel).unwrap_or_else(ToolOutput::error),
-                Err(message) => ToolOutput::error(message),
-            },
-            Self::ReadImage => match parse_read_image(arguments).and_then(|path| {
-                image_input::read_input_image(&roots.input, &path, cancel)
-                    .map(|data| (path, data))
-                    .map_err(|error| error.to_string())
-            }) {
-                Ok((path, data)) => ToolOutput::image(path, data),
-                Err(message) => ToolOutput::error(message),
-            },
+    pub fn is_search(&self) -> bool {
+        matches!(self.operation, BuiltinOperation::Search(..))
+    }
+
+    pub fn execute_cancellable(self, roots: &Roots, cancel: &CancellationToken) -> ToolOutput {
+        match self.operation {
+            BuiltinOperation::Search(config, args) => {
+                search(roots, &config, &args, cancel).unwrap_or_else(ToolOutput::error)
+            }
+            BuiltinOperation::Read(config, args) => {
+                read(roots, &config, &args, cancel).unwrap_or_else(ToolOutput::error)
+            }
+            BuiltinOperation::ReadImage(path) => {
+                match image_input::read_input_image(&roots.input, &path, cancel) {
+                    Ok(data) => ToolOutput::image(path, data),
+                    Err(message) => ToolOutput::error(message),
+                }
+            }
         }
     }
 }
@@ -1839,11 +1855,10 @@ mod tests {
         .executor;
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let output = tool.execute_cancellable(
-            &fixture.roots,
-            &serde_json::json!({"scope":"input","path":"a.txt"}),
-            &cancel,
-        );
+        let output = tool
+            .prepare(&serde_json::json!({"scope":"input","path":"a.txt"}))
+            .unwrap()
+            .execute_cancellable(&fixture.roots, &cancel);
         assert!(output.content.contains("取消"), "{}", output.content);
         assert!(!output.cacheable);
     }
@@ -1885,8 +1900,8 @@ mod tests {
         let explicit =
             serde_json::json!({"literal":false,"scope":"input","context":0,"pattern":"x"});
         assert_eq!(
-            tool.canonical_cache_key(&short),
-            tool.canonical_cache_key(&explicit)
+            tool.prepare(&short).unwrap().canonical_cache_key(),
+            tool.prepare(&explicit).unwrap().canonical_cache_key()
         );
     }
 }

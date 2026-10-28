@@ -8,7 +8,9 @@ use super::{
 };
 use crate::diagnostic::GenericResourceKind;
 use crate::execution::CooperativeCancellation;
-use crate::generic::placeholder::{GenericPlaceholderError, GenericPlaceholderService};
+use crate::generic::placeholder::{
+    GenericCompiledPlaceholderRules, GenericPlaceholderError, GenericPlaceholderService,
+};
 use crate::translation::planning_resource::{
     CompiledTerminology, TerminologyDefinitionError, TerminologyEntry,
     compile_terminology_with_cancellation,
@@ -67,13 +69,13 @@ impl fmt::Debug for GenericCompiledTerminologyResource {
 /// 当前 Generic 项目已经通过规范解析和语义校验的资源。
 ///
 /// `load_current_translation_state` 在完整数据库校验期间建立这份值，并把同一份编译结果
-/// 交给消费方。术语编译结果可直接复用；Placeholder 在消费入口结合当前自然 ID
-/// 重新编译。调用方不能把裸
-/// JSON 标记成已验证。
+/// 交给消费方。Placeholder 在消费入口结合完整自然 ID 集校验目标，复用同一份正则。
+/// 调用方不能把裸 JSON 标记成已验证。
 #[derive(Clone)]
 pub(crate) struct GenericCompiledTranslationResources {
     terminology: GenericCompiledTerminologyResource,
     placeholder_rules_json: String,
+    placeholder_rules: GenericCompiledPlaceholderRules,
 }
 
 impl fmt::Debug for GenericCompiledTranslationResources {
@@ -96,6 +98,10 @@ impl GenericCompiledTranslationResources {
 
     pub(crate) fn placeholder_rules_json(&self) -> &str {
         &self.placeholder_rules_json
+    }
+
+    pub(crate) fn placeholder_rules(&self) -> GenericCompiledPlaceholderRules {
+        self.placeholder_rules.clone()
     }
 
     pub(crate) fn terminology(&self) -> Arc<CompiledTerminology> {
@@ -266,11 +272,13 @@ pub(super) fn compile_translation_resources_with_cancellation(
 ) -> Result<GenericCompiledTranslationResources, GenericProjectError> {
     let terminology =
         compile_terminology_resource_with_cancellation(terminology_json, cancellation)?;
-    validate_placeholder_resource_with_cancellation(&placeholder_rules_json, cancellation)?;
+    let placeholder_rules =
+        compile_placeholder_resource_with_cancellation(&placeholder_rules_json, cancellation)?;
     ensure_generic_operation_not_cancelled(cancellation)?;
     Ok(GenericCompiledTranslationResources {
         terminology,
         placeholder_rules_json,
+        placeholder_rules,
     })
 }
 
@@ -339,10 +347,10 @@ fn terminology_resource_error(source: TerminologyDefinitionError) -> GenericProj
     }
 }
 
-fn validate_placeholder_resource_with_cancellation(
+fn compile_placeholder_resource_with_cancellation(
     canonical_json: &str,
     cancellation: &CooperativeCancellation,
-) -> Result<(), GenericProjectError> {
+) -> Result<GenericCompiledPlaceholderRules, GenericProjectError> {
     let service = GenericPlaceholderService::default();
     let definitions = service
         .parse_canonical_json_with_cancellation(canonical_json, || {
@@ -372,13 +380,13 @@ fn validate_placeholder_resource_with_cancellation(
             },
         ));
     }
-    let _compiled = service
+    let compiled = service
         .compile_with_cancellation(definitions, || {
             ensure_generic_operation_not_cancelled(cancellation)
         })?
         .map_err(placeholder_resource_error)?;
     ensure_generic_operation_not_cancelled(cancellation)?;
-    Ok(())
+    Ok(compiled)
 }
 
 fn placeholder_resource_error(source: GenericPlaceholderError) -> GenericProjectError {

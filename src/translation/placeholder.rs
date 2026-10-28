@@ -262,6 +262,27 @@ impl PlaceholderOrderPolicy {
 }
 
 impl CompiledPlaceholderRules {
+    pub(crate) fn validate_target_ids_with_cancellation<E>(
+        &self,
+        mut valid_id: impl FnMut(&str) -> bool,
+        mut ensure_running: impl FnMut() -> Result<(), E>,
+    ) -> Result<Result<(), PlaceholderRuleCompilationError>, E> {
+        ensure_running()?;
+        for rule in self.rules.iter() {
+            ensure_running()?;
+            for id in rule.ids.iter().flatten() {
+                ensure_running()?;
+                if !valid_id(id) {
+                    return Ok(Err(PlaceholderRuleCompilationError::UnknownId {
+                        rule_number: rule.rule_number,
+                        id: clone_placeholder_text_with_cancellation(id, &mut ensure_running)?,
+                    }));
+                }
+            }
+        }
+        Ok(Ok(()))
+    }
+
     /// 返回对当前自然 Unit 实际生效的完整自定义候选契约。
     ///
     /// 即使源文没有命中任何规则，pattern、精确 ID 和顺序策略仍决定候选能否新增某个
@@ -440,8 +461,8 @@ impl PlaceholderService {
     ///
     /// 所有 scope 和空 pattern 校验完成后，把整批已校验规则交给一个隔离 worker。
     /// PCRE2 没有取消回调；调用方取消时不等待当前纯计算结束，且每次调用最多遗留一个
-    /// 已经运行的有限 worker。这个入口只用于尚未持有 Extract 快照的资源语法检查；
-    /// 真正执行翻译或 Manual 时必须改用带完整自然 ID 集的入口。
+    /// 已经运行的有限 worker。尚未持有 Extract 快照时先编译资源；消费前再通过
+    /// `validate_target_ids_with_cancellation` 校验完整自然 ID 集，无需重新编译。
     pub(crate) fn compile_custom_with_cancellation<E>(
         &self,
         definitions: Vec<PlaceholderRuleDefinition>,

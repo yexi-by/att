@@ -50,9 +50,7 @@ use crate::runtime::performance::RunPerformanceCounters;
 use crate::runtime::project_log::{
     ProjectLogAmount, ProjectLogCommand, ProjectLogPhase, RunPlanValueSource,
 };
-use crate::translation::planning_resource::{
-    TranslationPlanningResourceReader, TranslationPlanningResourceReadingService,
-};
+use crate::translation::planning_resource::TranslationPlanningResourceReadingService;
 use crate::translation::task_record::ConfiguredTranslationTaskRecordSink;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -244,34 +242,27 @@ impl ProductionGenericCommandRunner {
                 .map_or(GenericPlaceholderRuleSource::ProjectSnapshot, |path| {
                     GenericPlaceholderRuleSource::ExternalFile(path.clone())
                 });
-            let (terminology, terminology_json, placeholder_json) =
-                if terminology_path.is_none() && placeholder_rules_path.is_none() {
-                    (
-                        current_resources.terminology(),
-                        current_terminology_json,
-                        current_placeholder_json,
-                    )
-                } else {
-                    let resource_reader = TranslationPlanningResourceReadingService::new(
-                        operation_file_system.clone(),
-                        operation_cpu.clone(),
-                    )
-                    .with_cancellation(operation_cancellation.clone());
-                    let resources = resource_reader
-                        .read(
-                            terminology_path,
-                            placeholder_rules_path,
-                            current_terminology_json,
-                            current_placeholder_json,
-                        )
-                        .await
-                        .map_err(generic_translation_resource_failure)?;
-                    let (terminology, placeholder_definitions, terminology_json, placeholder_json) =
-                        resources.into_parts();
+            let resource_reader = TranslationPlanningResourceReadingService::new(
+                operation_file_system.clone(),
+                operation_cpu.clone(),
+            )
+            .with_cancellation(operation_cancellation.clone());
+            let resources = resource_reader
+                .read_external(terminology_path, placeholder_rules_path)
+                .await
+                .map_err(generic_translation_resource_failure)?;
+            let (terminology, terminology_json) = resources
+                .terminology
+                .map(|(compiled, json)| (Arc::new(compiled), json))
+                .unwrap_or_else(|| (current_resources.terminology(), current_terminology_json));
+            let (placeholder_rules, placeholder_json) =
+                if let Some((placeholder_definitions, placeholder_json)) =
+                    resources.placeholder_rules
+                {
                     // 先验收整个资源的语法，再按当前项目绑定自然 ID；保持资源错误优先序。
                     let placeholder_compile_cancellation = operation_cancellation.clone();
                     let placeholder_compile_source = placeholder_rule_source.clone();
-                    operation_cpu
+                    let compiled = operation_cpu
                         .execute(move || {
                             GenericPlaceholderService::default()
                                 .compile_with_cancellation(placeholder_definitions, || {
@@ -285,34 +276,31 @@ impl ProductionGenericCommandRunner {
                         .await
                         .map_err(generic_cpu_execution_failure)?
                         .map_err(generic_preparation_failure)?;
-                    (terminology, terminology_json, placeholder_json)
+                    (compiled, placeholder_json)
+                } else {
+                    (
+                        current_resources.placeholder_rules(),
+                        current_placeholder_json,
+                    )
                 };
 
             let valid_placeholder_ids = snapshot.natural_unit_ids();
-            let strict_placeholder_json = placeholder_json.clone();
             let strict_placeholder_source = placeholder_rule_source.clone();
             let strict_placeholder_cancellation = operation_cancellation.clone();
             let placeholder_rules = operation_cpu
                 .execute(move || {
                     let service = GenericPlaceholderService::default();
-                    let definitions = service
-                        .parse_canonical_json_with_cancellation(&strict_placeholder_json, || {
-                            ensure_generic_cpu_running(&strict_placeholder_cancellation)
-                        })?
-                        .map_err(|source| GenericPreparationError::Placeholder {
-                            rule_source: strict_placeholder_source.clone(),
-                            source,
-                        })?;
                     service
-                        .compile_for_ids_with_cancellation(
-                            definitions,
+                        .validate_compiled_ids_with_cancellation(
+                            &placeholder_rules,
                             &valid_placeholder_ids,
                             || ensure_generic_cpu_running(&strict_placeholder_cancellation),
                         )?
                         .map_err(|source| GenericPreparationError::Placeholder {
                             rule_source: strict_placeholder_source,
                             source,
-                        })
+                        })?;
+                    Ok::<_, GenericPreparationError>(placeholder_rules)
                 })
                 .await
                 .map_err(generic_cpu_execution_failure)?

@@ -126,11 +126,7 @@ fn build_request_inner(
     if let Some(key) = &config.api_key {
         headers.push(("x-api-key".to_string(), key.clone()));
     }
-    Ok((
-        format!("{}/messages", config.base_url.trim_end_matches('/')),
-        body.to_string(),
-        headers,
-    ))
+    Ok((config.endpoint.clone(), body.to_string(), headers))
 }
 
 fn user_content(
@@ -727,7 +723,7 @@ mod tests {
     fn history_folds_consecutive_tool_results() {
         let config = LlmConfig {
             protocol: super::super::Protocol::Anthropic,
-            base_url: "http://x".into(),
+            endpoint: "http://x/messages".parse().unwrap(),
             model: "m".into(),
             api_key: None,
             context_window_tokens: 131072,

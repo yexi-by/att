@@ -3018,6 +3018,45 @@ fn explicitly_selected_missing_config_fails_before_any_request() {
 }
 
 #[test]
+fn invalid_llm_url_is_a_configuration_error_before_job_creation() {
+    for url in [
+        "not-a-url",
+        "https://",
+        "ftp://example.com/private-url-sentinel",
+        "https://example.com:invalid/private-url-sentinel",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (data, plan, task, out) = write_job(dir.path(), None);
+        let config = dir.path().join("config.toml");
+        fs::write(
+            &config,
+            format!(
+                "protocol='completions'\nurl='{url}'\nmodel='m'\ncontext_window_tokens=8192\nmodel_input_modalities=['text']\n"
+            ),
+        )
+        .unwrap();
+        let run = formic_command(1, &data, &plan, &task, &out)
+            .arg("--config")
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert_eq!(run.status.code(), Some(2), "{}", stderr_of(&run));
+        assert!(stderr_of(&run).contains("url 必须是"));
+        assert!(!out.exists());
+
+        let check = formic_test_command(&config).output().unwrap();
+        assert_eq!(check.status.code(), Some(2));
+        let stdout = stdout_of(&check);
+        assert!(stdout.contains("配置：失败"), "{stdout}");
+        assert!(!stdout.contains("LLM："), "{stdout}");
+        for output in [&run, &check] {
+            assert!(!stdout_of(output).contains("private-url-sentinel"));
+            assert!(!stderr_of(output).contains("private-url-sentinel"));
+        }
+    }
+}
+
+#[test]
 fn configured_llm_headers_reach_test_and_worker_on_all_protocols() {
     for protocol in ["completions", "responses", "anthropic"] {
         let dir = tempfile::tempdir().unwrap();

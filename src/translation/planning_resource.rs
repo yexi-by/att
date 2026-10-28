@@ -42,6 +42,11 @@ pub(crate) struct TranslationPlanningResources {
     placeholder_rules_json: String,
 }
 
+pub(crate) struct ExternalTranslationPlanningResources {
+    pub(crate) terminology: Option<(CompiledTerminology, String)>,
+    pub(crate) placeholder_rules: Option<(Vec<PlaceholderRuleDefinition>, String)>,
+}
+
 impl TranslationPlanningResources {
     pub(crate) fn new(
         terminology: CompiledTerminology,
@@ -537,6 +542,99 @@ where
         current_terminology_json: String,
         current_placeholder_rules_json: String,
     ) -> Result<TranslationPlanningResources, Self::Error> {
+        let (terminology_file, placeholder_file) = self
+            .read_files(terminology_path, placeholder_rules_path)
+            .await?;
+        let terminology_parse = parse_terminology_resource::<F::Error, C>(
+            &self.cpu,
+            terminology_file.map_or(
+                PlanningResourceInput::Snapshot(current_terminology_json),
+                PlanningResourceInput::External,
+            ),
+            self.cancellation.clone(),
+        );
+        let placeholder_parse = parse_placeholder_resource::<F::Error, C>(
+            &self.cpu,
+            placeholder_file.map_or(
+                PlanningResourceInput::Snapshot(current_placeholder_rules_json),
+                PlanningResourceInput::External,
+            ),
+            self.cancellation.clone(),
+        );
+        let (terminology, placeholder_rules) =
+            futures_util::join!(terminology_parse, placeholder_parse);
+        let (terminology, terminology_json) = terminology?;
+        let (placeholder_rules, placeholder_rules_json) = placeholder_rules?;
+        if self.cancellation.is_requested() {
+            return Err(TranslationPlanningResourceReadingError::Cancelled);
+        }
+
+        Ok(TranslationPlanningResources::new(
+            terminology,
+            placeholder_rules,
+            terminology_json,
+            placeholder_rules_json,
+        ))
+    }
+}
+
+impl<F: FileReader, C: CpuTaskExecutor> TranslationPlanningResourceReadingService<F, C> {
+    pub(crate) async fn read_external(
+        &self,
+        terminology_path: Option<PathBuf>,
+        placeholder_rules_path: Option<PathBuf>,
+    ) -> Result<
+        ExternalTranslationPlanningResources,
+        TranslationPlanningResourceReadingError<F::Error, C::Error>,
+    > {
+        let (terminology_file, placeholder_file) = self
+            .read_files(terminology_path, placeholder_rules_path)
+            .await?;
+        let terminology_parse = async {
+            match terminology_file {
+                Some(file) => parse_terminology_resource::<F::Error, C>(
+                    &self.cpu,
+                    PlanningResourceInput::External(file),
+                    self.cancellation.clone(),
+                )
+                .await
+                .map(Some),
+                None => Ok(None),
+            }
+        };
+        let placeholder_parse = async {
+            match placeholder_file {
+                Some(file) => parse_placeholder_resource::<F::Error, C>(
+                    &self.cpu,
+                    PlanningResourceInput::External(file),
+                    self.cancellation.clone(),
+                )
+                .await
+                .map(Some),
+                None => Ok(None),
+            }
+        };
+        let (terminology, placeholder_rules) =
+            futures_util::join!(terminology_parse, placeholder_parse);
+        let terminology = terminology?;
+        let placeholder_rules = placeholder_rules?;
+        if self.cancellation.is_requested() {
+            return Err(TranslationPlanningResourceReadingError::Cancelled);
+        }
+        Ok(ExternalTranslationPlanningResources {
+            terminology,
+            placeholder_rules,
+        })
+    }
+
+    async fn read_files(
+        &self,
+        terminology_path: Option<PathBuf>,
+        placeholder_rules_path: Option<PathBuf>,
+    ) -> Result<
+        (Option<ReadFile>, Option<ReadFile>),
+        TranslationPlanningResourceReadingError<F::Error, C::Error>,
+    > {
         if self.cancellation.is_requested() {
             return Err(TranslationPlanningResourceReadingError::Cancelled);
         }
@@ -562,32 +660,7 @@ where
             return Err(TranslationPlanningResourceReadingError::Cancelled);
         }
 
-        let terminology_parse = parse_terminology_resource::<F::Error, C>(
-            &self.cpu,
-            terminology_file,
-            current_terminology_json,
-            self.cancellation.clone(),
-        );
-        let placeholder_parse = parse_placeholder_resource::<F::Error, C>(
-            &self.cpu,
-            placeholder_file,
-            current_placeholder_rules_json,
-            self.cancellation.clone(),
-        );
-        let (terminology, placeholder_rules) =
-            futures_util::join!(terminology_parse, placeholder_parse);
-        let (terminology, terminology_json) = terminology?;
-        let (placeholder_rules, placeholder_rules_json) = placeholder_rules?;
-        if self.cancellation.is_requested() {
-            return Err(TranslationPlanningResourceReadingError::Cancelled);
-        }
-
-        Ok(TranslationPlanningResources::new(
-            terminology,
-            placeholder_rules,
-            terminology_json,
-            placeholder_rules_json,
-        ))
+        Ok((terminology_file, placeholder_file))
     }
 }
 
@@ -603,19 +676,13 @@ async fn read_optional<F: FileReader>(
 
 async fn parse_terminology_resource<F, C: CpuTaskExecutor>(
     cpu: &C,
-    file: Option<ReadFile>,
-    current_json: String,
+    input: PlanningResourceInput,
     cancellation: CooperativeCancellation,
 ) -> Result<(CompiledTerminology, String), TranslationPlanningResourceReadingError<F, C::Error>> {
-    let (path, input) = file.map_or_else(
-        || (None, PlanningResourceInput::Snapshot(current_json)),
-        |file| {
-            (
-                Some(file.resolved_path().to_owned()),
-                PlanningResourceInput::External(file.into_bytes()),
-            )
-        },
-    );
+    let path = match &input {
+        PlanningResourceInput::External(file) => Some(file.resolved_path().to_owned()),
+        PlanningResourceInput::Snapshot(_) => None,
+    };
     let error_path = path.clone();
     let parsed = cpu
         .execute(move || {
@@ -623,8 +690,8 @@ async fn parse_terminology_resource<F, C: CpuTaskExecutor>(
             ensure_planning_resource_running(&is_cancelled)
                 .map_err(|()| TerminologyDefinitionError::Cancelled)?;
             let entries = match input {
-                PlanningResourceInput::External(bytes) => {
-                    parse_terminology_toml_with_cancellation(bytes, &is_cancelled)?
+                PlanningResourceInput::External(file) => {
+                    parse_terminology_toml_with_cancellation(file.into_bytes(), &is_cancelled)?
                 }
                 PlanningResourceInput::Snapshot(json) => {
                     parse_terminology_snapshot_with_cancellation(&json, &is_cancelled)?
@@ -654,22 +721,16 @@ async fn parse_terminology_resource<F, C: CpuTaskExecutor>(
 
 async fn parse_placeholder_resource<F, C: CpuTaskExecutor>(
     cpu: &C,
-    file: Option<ReadFile>,
-    current_json: String,
+    input: PlanningResourceInput,
     cancellation: CooperativeCancellation,
 ) -> Result<
     (Vec<PlaceholderRuleDefinition>, String),
     TranslationPlanningResourceReadingError<F, C::Error>,
 > {
-    let (path, input) = file.map_or_else(
-        || (None, PlanningResourceInput::Snapshot(current_json)),
-        |file| {
-            (
-                Some(file.resolved_path().to_owned()),
-                PlanningResourceInput::External(file.into_bytes()),
-            )
-        },
-    );
+    let path = match &input {
+        PlanningResourceInput::External(file) => Some(file.resolved_path().to_owned()),
+        PlanningResourceInput::Snapshot(_) => None,
+    };
     let error_path = path.clone();
     let parsed = cpu
         .execute(move || {
@@ -677,8 +738,8 @@ async fn parse_placeholder_resource<F, C: CpuTaskExecutor>(
             ensure_planning_resource_running(&is_cancelled)
                 .map_err(|()| PlaceholderDefinitionError::Cancelled)?;
             let definitions = match input {
-                PlanningResourceInput::External(bytes) => {
-                    parse_placeholder_toml_with_cancellation(bytes, &is_cancelled)?
+                PlanningResourceInput::External(file) => {
+                    parse_placeholder_toml_with_cancellation(file.into_bytes(), &is_cancelled)?
                 }
                 PlanningResourceInput::Snapshot(json) => {
                     parse_placeholder_snapshot_with_cancellation(&json, &is_cancelled)?
@@ -707,7 +768,7 @@ async fn parse_placeholder_resource<F, C: CpuTaskExecutor>(
 }
 
 enum PlanningResourceInput {
-    External(Vec<u8>),
+    External(ReadFile),
     Snapshot(String),
 }
 
@@ -1781,9 +1842,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    #[cfg(feature = "release-stress")]
     use crate::runtime::cpu::{CpuExecutorConfig, RayonCpuExecutor};
-    #[cfg(feature = "release-stress")]
     use crate::runtime::filesystem::SystemFileSystem;
 
     #[test]
@@ -2521,6 +2580,54 @@ mod tests {
             resources.placeholder_rules_json,
             r#"[{"scopes":["event_dialogue"],"order":"preserve","pattern":"\\\\SE\\[[^]]+\\]"}]"#
         );
+    }
+
+    #[tokio::test]
+    async fn external_resource_selection_preserves_unselected_resources() {
+        let directory = tempfile::tempdir().unwrap();
+        let terms_path = directory.path().join("terms.toml");
+        let placeholders_path = directory.path().join("placeholders.toml");
+        std::fs::write(
+            &terms_path,
+            "[[term]]\nterm = '魔法剣'\ntranslation = '魔法剑'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &placeholders_path,
+            "[[rule]]\norder = 'preserve'\npattern = '\\{[^}]+\\}'\n",
+        )
+        .unwrap();
+        let file_system = SystemFileSystem::new().unwrap();
+        let cpu = RayonCpuExecutor::start(CpuExecutorConfig::production()).unwrap();
+        let reader =
+            TranslationPlanningResourceReadingService::new(file_system.clone(), cpu.clone());
+
+        let terms = reader.read_external(Some(terms_path), None).await.unwrap();
+        let (compiled, _) = terms.terminology.unwrap();
+        assert_eq!(
+            compiled.triggered_by(["使用魔法剣"])[0].translation(),
+            "魔法剑"
+        );
+        assert!(terms.placeholder_rules.is_none());
+        let placeholders = reader
+            .read_external(None, Some(placeholders_path))
+            .await
+            .unwrap();
+        assert!(placeholders.terminology.is_none());
+        let (definitions, _) = placeholders.placeholder_rules.unwrap();
+        let service = crate::generic::GenericPlaceholderService::default();
+        let compiled = service.compile(definitions).unwrap();
+        let protected = service
+            .protect("dialogue", "你好 {name}", &compiled)
+            .unwrap();
+        assert_eq!(protected.placeholders().len(), 1);
+        assert_eq!(
+            service.restore(&protected, protected.text()).unwrap(),
+            "你好 {name}"
+        );
+
+        file_system.shutdown().await.unwrap();
+        cpu.shutdown().unwrap();
     }
 
     #[cfg(feature = "release-stress")]

@@ -15,7 +15,7 @@ use crate::config::{CacheConfig, ToolsConfig};
 use crate::llm::{InputModalities, ToolSpec};
 use crate::mcp::{McpManager, McpStartupError, McpTool};
 use crate::output_access::WorkerOutputAccess;
-use crate::tools::{self, BuiltinTool, Roots, ToolOutput};
+use crate::tools::{self, BuiltinTool, PreparedBuiltinCall, Roots, ToolOutput};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolSource {
@@ -400,9 +400,14 @@ async fn dispatch(
     };
     match target {
         RuntimeTarget::Builtin { executor, permits } => {
-            let cache_key = executor
-                .canonical_cache_key(&arguments)
-                .map(|arguments| format!("{name}\n{arguments}"));
+            let prepared = executor.prepare(&arguments);
+            let cache_key = cache.as_ref().and_then(|_| {
+                prepared
+                    .as_ref()
+                    .ok()
+                    .and_then(PreparedBuiltinCall::canonical_cache_key)
+                    .map(|arguments| format!("{name}\n{arguments}"))
+            });
             if let (Some(cache), Some(key)) = (&cache, cache_key) {
                 loop {
                     match cache.lookup(&key).await {
@@ -435,14 +440,8 @@ async fn dispatch(
                                 }
                             };
                             let wait_ms = elapsed_ms(started);
-                            let result = execute_builtin(
-                                executor.clone(),
-                                roots,
-                                arguments,
-                                permits,
-                                cancel.clone(),
-                            )
-                            .await;
+                            let result =
+                                execute_builtin(prepared, roots, permits, cancel.clone()).await;
                             match result {
                                 Ok((output, execution_ms)) => {
                                     let output = Arc::new(output);
@@ -473,8 +472,7 @@ async fn dispatch(
             let permits = acquire_permits(permits, &global, cancel).await?;
             let wait_ms = elapsed_ms(started);
             let (output, execution_ms) =
-                execute_builtin(executor.clone(), roots, arguments, permits, cancel.clone())
-                    .await?;
+                execute_builtin(prepared, roots, permits, cancel.clone()).await?;
             Ok(ToolResponse {
                 content: output.content,
                 images: output.images,
@@ -564,19 +562,21 @@ async fn acquire_permits(
 }
 
 async fn execute_builtin(
-    executor: BuiltinTool,
+    prepared: Result<PreparedBuiltinCall, String>,
     roots: Arc<Roots>,
-    arguments: Value,
     permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
     cancel: CancellationToken,
 ) -> Result<(ToolOutput, u64), SchedulerError> {
     crate::metrics::gauge_add(&crate::metrics::TOOL_INFLIGHT, 1);
-    let is_search = matches!(&executor, BuiltinTool::Search(_));
+    let is_search = prepared.as_ref().is_ok_and(PreparedBuiltinCall::is_search);
     let task_cancel = cancel.clone();
     let joined = tokio::task::spawn_blocking(move || {
         let _permits = permits;
         let started = Instant::now();
-        let output = executor.execute_cancellable(&roots, &arguments, &task_cancel);
+        let output = match prepared {
+            Ok(call) => call.execute_cancellable(&roots, &task_cancel),
+            Err(message) => ToolOutput::error(message),
+        };
         let elapsed = elapsed_ms(started);
         if is_search {
             crate::metrics::observe_search_ms(elapsed);
@@ -666,6 +666,55 @@ mod tests {
             .unwrap();
         assert_eq!(first.cache, CacheDisposition::Miss);
         assert_eq!(second.cache, CacheDisposition::Hit);
+    }
+
+    #[tokio::test]
+    async fn invalid_builtin_arguments_are_uncached_and_valid_calls_still_execute() {
+        for cache_enabled in [false, true] {
+            let (_directory, scheduler) = scheduler(cache_enabled);
+            let expected = if cache_enabled {
+                CacheDisposition::Bypassed
+            } else {
+                CacheDisposition::Disabled
+            };
+            for (name, arguments) in [
+                (
+                    "read",
+                    serde_json::json!({"scope":"input","path":"../a.txt"}),
+                ),
+                (
+                    "search",
+                    serde_json::json!({"scope":"input","pattern":"x","context":-1}),
+                ),
+            ] {
+                for unit in [1, 2] {
+                    let response = scheduler
+                        .execute(unit, name, arguments.clone(), CancellationToken::new())
+                        .await
+                        .unwrap();
+                    assert!(
+                        response.content.starts_with("错误："),
+                        "{}",
+                        response.content
+                    );
+                    assert_eq!(response.cache, expected);
+                }
+            }
+            let response = scheduler
+                .execute(
+                    3,
+                    "read",
+                    serde_json::json!({"scope":"input","path":"a.txt"}),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                !response.content.starts_with("错误："),
+                "{}",
+                response.content
+            );
+        }
     }
 
     #[tokio::test]

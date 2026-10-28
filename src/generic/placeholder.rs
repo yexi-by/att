@@ -95,8 +95,7 @@ impl GenericPlaceholderService {
             .map(|result| result.map_err(GenericPlaceholderError::Compilation))
     }
 
-    /// 按当前项目完整 Extract Unit 自然 ID 集编译规则。执行 Translate、Manual 或
-    /// WriteBack 前必须使用这个入口；资源快照的无上下文语法检查不能代替它。
+    /// 在首次编译时同时校验当前项目的完整 Extract Unit 自然 ID 集。
     pub(crate) fn compile_for_ids_with_cancellation<E>(
         &self,
         definitions: Vec<GenericPlaceholderRuleDefinition>,
@@ -110,6 +109,17 @@ impl GenericPlaceholderService {
                 |id| valid_ids.contains(id),
                 ensure_running,
             )
+            .map(|result| result.map_err(GenericPlaceholderError::Compilation))
+    }
+
+    pub(crate) fn validate_compiled_ids_with_cancellation<E>(
+        &self,
+        compiled: &GenericCompiledPlaceholderRules,
+        valid_ids: &HashSet<String>,
+        ensure_running: impl FnMut() -> Result<(), E>,
+    ) -> Result<Result<(), GenericPlaceholderError>, E> {
+        compiled
+            .validate_target_ids_with_cancellation(|id| valid_ids.contains(id), ensure_running)
             .map(|result| result.map_err(GenericPlaceholderError::Compilation))
     }
 
@@ -496,6 +506,52 @@ impl Error for GenericPlaceholderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiled_rules_validate_project_ids_without_changing_target_matching() {
+        let service = GenericPlaceholderService::default();
+        let compiled = service
+            .compile(vec![
+                GenericPlaceholderRuleDefinition::new(None, r"\{[^}]+\}")
+                    .with_ids(vec!["scene:line".into()]),
+            ])
+            .unwrap();
+        let valid_ids = HashSet::from(["scene:line".to_owned(), "scene:other".to_owned()]);
+        service
+            .validate_compiled_ids_with_cancellation(&compiled, &valid_ids, || {
+                Ok::<_, Infallible>(())
+            })
+            .unwrap()
+            .unwrap();
+
+        for (id, expected_count) in [("scene:line", 1), ("scene:other", 0)] {
+            let protected = service
+                .protect_target_with_cancellation(id, "dialogue", "Hello {name}", &compiled, || {
+                    Ok::<_, Infallible>(())
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(protected.placeholders().len(), expected_count);
+            assert_eq!(
+                service.restore(&protected, protected.text()).unwrap(),
+                "Hello {name}"
+            );
+        }
+        assert!(matches!(
+            service.validate_compiled_ids_with_cancellation(
+                &compiled, &HashSet::new(), || Ok::<_, Infallible>(()),
+            ).unwrap(),
+            Err(GenericPlaceholderError::Compilation(PlaceholderRuleCompilationError::UnknownId {
+                rule_number: 1, id,
+            })) if id == "scene:line"
+        ));
+        assert!(matches!(
+            service.validate_compiled_ids_with_cancellation(&compiled, &valid_ids, || Err(
+                "cancelled"
+            )),
+            Err("cancelled")
+        ));
+    }
 
     #[test]
     fn arbitrary_kind_scope_is_exact_and_round_trips() {

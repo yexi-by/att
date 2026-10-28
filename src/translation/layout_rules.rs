@@ -106,15 +106,15 @@ impl ExternalLayoutRule {
     fn validate(self, rule_number: usize) -> Result<LayoutRuleDefinition, LayoutRulesError> {
         let definition = LayoutRuleDefinition {
             max_fullwidth_chars: self.max_fullwidth_chars,
-            scopes: validate_text_selector(self.scopes, rule_number, "scopes")?,
-            ids: validate_text_selector(self.ids, rule_number, "ids")?,
-            source_files: validate_text_selector(self.source_files, rule_number, "source_files")?,
-            fields: validate_text_selector(self.fields, rule_number, "fields")?,
-            owners: validate_text_selector(self.owners, rule_number, "owners")?,
-            rule_numbers: validate_number_selector(self.rule_numbers, rule_number, "rule_numbers")?,
-            group_ids: validate_text_selector(self.group_ids, rule_number, "group_ids")?,
-            unit_ids: validate_text_selector(self.unit_ids, rule_number, "unit_ids")?,
-            exclude_ids: validate_text_selector(self.exclude_ids, rule_number, "exclude_ids")?,
+            scopes: explicit_selector(self.scopes, rule_number, "scopes")?,
+            ids: explicit_selector(self.ids, rule_number, "ids")?,
+            source_files: explicit_selector(self.source_files, rule_number, "source_files")?,
+            fields: explicit_selector(self.fields, rule_number, "fields")?,
+            owners: explicit_selector(self.owners, rule_number, "owners")?,
+            rule_numbers: explicit_selector(self.rule_numbers, rule_number, "rule_numbers")?,
+            group_ids: explicit_selector(self.group_ids, rule_number, "group_ids")?,
+            unit_ids: explicit_selector(self.unit_ids, rule_number, "unit_ids")?,
+            exclude_ids: explicit_selector(self.exclude_ids, rule_number, "exclude_ids")?,
         };
         validate_definition(&definition, rule_number)?;
         Ok(definition)
@@ -155,33 +155,17 @@ fn validate_definition(
     Ok(())
 }
 
-fn validate_text_selector(
-    values: Option<Vec<String>>,
+fn explicit_selector<T>(
+    values: Option<Vec<T>>,
     rule_number: usize,
     field: &'static str,
-) -> Result<Vec<String>, LayoutRulesError> {
+) -> Result<Vec<T>, LayoutRulesError> {
     let Some(values) = values else {
         return Ok(Vec::new());
     };
     if values.is_empty() {
         return Err(rule_error(rule_number, format!("{field} 不能是空数组")));
     }
-    validate_text_values(&values, rule_number, field)?;
-    Ok(values)
-}
-
-fn validate_number_selector(
-    values: Option<Vec<usize>>,
-    rule_number: usize,
-    field: &'static str,
-) -> Result<Vec<usize>, LayoutRulesError> {
-    let Some(values) = values else {
-        return Ok(Vec::new());
-    };
-    if values.is_empty() {
-        return Err(rule_error(rule_number, format!("{field} 不能是空数组")));
-    }
-    validate_number_values(&values, rule_number, field)?;
     Ok(values)
 }
 
@@ -547,6 +531,24 @@ fields = ['body']
                 .is_err()
         );
         assert!(LayoutRuleSet::parse_toml(b"[[rule]]\nmax_fullwidth_chars = 20\n").is_err());
+    }
+
+    #[test]
+    fn both_formats_reject_invalid_selector_values() {
+        for (toml, json) in [
+            ("ids = ['']", r#""ids":[""]"#),
+            ("ids = ['unit', 'unit']", r#""ids":["unit","unit"]"#),
+            ("rule_numbers = [0]", r#""rule_numbers":[0]"#),
+            ("rule_numbers = [1, 1]", r#""rule_numbers":[1,1]"#),
+        ] {
+            let toml = format!("[[rule]]\nmax_fullwidth_chars = 20\n{toml}\n");
+            let json = format!(r#"[{{"max_fullwidth_chars":20,{json}}}]"#);
+            assert!(
+                LayoutRuleSet::parse_toml(toml.as_bytes()).is_err(),
+                "{toml}"
+            );
+            assert!(LayoutRuleSet::from_canonical_json(&json).is_err(), "{json}");
+        }
     }
 
     #[test]

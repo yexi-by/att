@@ -220,29 +220,22 @@ impl ProductionGenericCommandRunner {
                 .await?;
             }
             let valid_placeholder_ids = snapshot.natural_unit_ids();
-            let placeholder_json = current_resources.placeholder_rules_json().to_owned();
+            let placeholder_rules = current_resources.placeholder_rules();
             let placeholder_compile_cancellation = operation_cancellation.clone();
             let placeholder_rules = operation_cpu
                 .execute(move || {
                     let service = GenericPlaceholderService::default();
-                    let definitions = service
-                        .parse_canonical_json_with_cancellation(&placeholder_json, || {
-                            ensure_generic_cpu_running(&placeholder_compile_cancellation)
-                        })?
-                        .map_err(|source| GenericPreparationError::Placeholder {
-                            rule_source: GenericPlaceholderRuleSource::ProjectSnapshot,
-                            source,
-                        })?;
                     service
-                        .compile_for_ids_with_cancellation(
-                            definitions,
+                        .validate_compiled_ids_with_cancellation(
+                            &placeholder_rules,
                             &valid_placeholder_ids,
                             || ensure_generic_cpu_running(&placeholder_compile_cancellation),
                         )?
                         .map_err(|source| GenericPreparationError::Placeholder {
                             rule_source: GenericPlaceholderRuleSource::ProjectSnapshot,
                             source,
-                        })
+                        })?;
+                    Ok::<_, GenericPreparationError>(placeholder_rules)
                 })
                 .await
                 .map_err(generic_cpu_execution_failure)?

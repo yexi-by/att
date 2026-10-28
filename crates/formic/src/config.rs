@@ -438,7 +438,7 @@ fn resolve(file: FileConfig) -> Result<AppConfig, ConfigError> {
     Ok(AppConfig {
         llm: LlmConfig {
             protocol,
-            base_url: non_empty(file.url).ok_or(ConfigError::MissingUrl)?,
+            endpoint: parse_llm_endpoint(file.url, protocol)?,
             model: non_empty(file.model).ok_or(ConfigError::MissingModel)?,
             api_key: non_empty(file.api_key),
             headers,
@@ -478,6 +478,28 @@ fn resolve(file: FileConfig) -> Result<AppConfig, ConfigError> {
         cache,
         mcp_servers,
     })
+}
+
+fn parse_llm_endpoint(
+    raw: Option<String>,
+    protocol: Protocol,
+) -> Result<reqwest::Url, ConfigError> {
+    let raw = non_empty(raw).ok_or(ConfigError::MissingUrl)?;
+    let invalid = || ConfigError::Invalid("url 必须是带主机名的 HTTP 或 HTTPS 地址".into());
+    let mut url = reqwest::Url::parse(&raw).map_err(|_| invalid())?;
+    if !matches!(url.scheme(), "http" | "https") || !url.has_host() {
+        return Err(invalid());
+    }
+    let endpoint_path = match protocol {
+        Protocol::Completions => "chat/completions",
+        Protocol::Responses => "responses",
+        Protocol::Anthropic => "messages",
+    };
+    url.set_path(&format!(
+        "{}/{endpoint_path}",
+        url.path().trim_end_matches('/')
+    ));
+    Ok(url)
 }
 
 fn parse_llm_headers(raw: BTreeMap<String, String>) -> Result<HeaderMap, ConfigError> {
@@ -809,7 +831,10 @@ metrics = false
         let config = load_fixture(Some(BASE_FILE)).unwrap();
 
         assert_eq!(config.llm.protocol, Protocol::Responses);
-        assert_eq!(config.llm.base_url, "https://file.example/v1");
+        assert_eq!(
+            config.llm.endpoint.as_str(),
+            "https://file.example/v1/responses"
+        );
         assert_eq!(config.llm.api_key.as_deref(), Some("file-key"));
         assert_eq!(config.llm.model, "file-model");
         assert_eq!(config.llm.context_window_tokens, 131072);
@@ -841,6 +866,42 @@ metrics = false
         assert_eq!(config.tools.read.max_result_bytes, 1024 * 1024);
         assert_eq!(config.tools.read.max_in_flight, 64);
         assert_eq!(config.cache.max_bytes, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn llm_endpoint_preserves_base_path_and_query_for_each_protocol() {
+        for (protocol, suffix) in [
+            ("completions", "chat/completions"),
+            ("responses", "responses"),
+            ("anthropic", "messages"),
+        ] {
+            for base in [
+                "http://localhost:8080",
+                "https://example.com/model%20api/v1///?route=one",
+            ] {
+                let file = BASE_FILE
+                    .replace(
+                        "protocol = \"responses\"",
+                        &format!("protocol = \"{protocol}\""),
+                    )
+                    .replace("https://file.example/v1", base);
+                let file = if protocol == "anthropic" {
+                    format!("{file}\nanthropic_max_tokens = 16384\n")
+                } else {
+                    file
+                };
+                let config = load_fixture(Some(&file)).unwrap();
+                let (url, _, _) = crate::llm::LlmClient::new(config.llm)
+                    .build_request("说明", &[], &[])
+                    .unwrap();
+                let expected = if base.starts_with("http:") {
+                    format!("http://localhost:8080/{suffix}")
+                } else {
+                    format!("https://example.com/model%20api/v1/{suffix}?route=one")
+                };
+                assert_eq!(url.as_str(), expected);
+            }
+        }
     }
 
     #[test]

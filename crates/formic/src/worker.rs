@@ -1449,7 +1449,9 @@ mod tests {
             task: "任务。".into(),
             llm: LlmClient::new(LlmConfig {
                 protocol: Protocol::Completions,
-                base_url: format!("http://127.0.0.1:{port}"),
+                endpoint: format!("http://127.0.0.1:{port}/chat/completions")
+                    .parse()
+                    .unwrap(),
                 model: "m".into(),
                 api_key: None,
                 context_window_tokens: 131072,
@@ -1642,7 +1644,9 @@ mod tests {
         let (_dir, mut ctx) = fixture(port);
         ctx.llm = LlmClient::new(LlmConfig {
             protocol: Protocol::Responses,
-            base_url: format!("http://127.0.0.1:{port}"),
+            endpoint: format!("http://127.0.0.1:{port}/responses")
+                .parse()
+                .unwrap(),
             model: "m".into(),
             api_key: None,
             context_window_tokens: 131072,

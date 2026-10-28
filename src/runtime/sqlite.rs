@@ -1973,7 +1973,7 @@ fn execute_bulk_insert(
     Ok(executed_statements)
 }
 
-fn run_transaction_on_connection(
+pub(crate) fn run_transaction_on_connection(
     connection: &Connection,
     plan: &SqliteTransactionPlan,
     performance: &RunPerformanceCounters,

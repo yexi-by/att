@@ -102,11 +102,7 @@ fn build_request_inner(
         .map(|key| ("authorization".to_string(), format!("Bearer {key}")))
         .into_iter()
         .collect();
-    Ok((
-        format!("{}/chat/completions", config.base_url.trim_end_matches('/')),
-        body.to_string(),
-        headers,
-    ))
+    Ok((config.endpoint.clone(), body.to_string(), headers))
 }
 
 fn user_content(
@@ -603,7 +599,7 @@ mod tests {
     fn history_maps_to_messages() {
         let config = LlmConfig {
             protocol: super::super::Protocol::Completions,
-            base_url: "http://x/v1".into(),
+            endpoint: "http://x/v1/chat/completions".parse().unwrap(),
             model: "m".into(),
             api_key: None,
             context_window_tokens: 131072,
