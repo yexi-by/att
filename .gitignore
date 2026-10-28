@@ -13,6 +13,7 @@
 **/*.rs.bk
 /dist/
 /.workbuddy/
+/.playwright-mcp/
 /.venv/
 /.pytest_cache/
 /.ruff_cache/
