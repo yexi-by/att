@@ -12,7 +12,7 @@ version.workspace = true
 edition = "2024"
 rust-version = "1.97"
 publish = false
-description = "面向 Agent 的游戏翻译命令行工具"
+description = "利用 Agent 实现全游戏汉化：Agent 负责解包、提取、审校与封包，ATT 负责被动接收文本并完成批量翻译"
 license = "AGPL-3.0-only"
 repository = "https://github.com/yexi-by/att"
 

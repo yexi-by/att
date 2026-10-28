@@ -1,36 +1,39 @@
 # ATT
 
-ATT 是面向 Agent 的游戏翻译命令行工具，运行于 Windows x64。它原生支持 RPG Maker MV/MZ，
-也可通过 Generic JSONL 接入其他游戏和自定义文本来源，串联提取、翻译、审校与写回。
+这是一套用编码 Agent（如 Codex）跑通**全游戏汉化**的工具链，运行于 Windows x64。
 
-Agent 负责理解游戏、制定规则和审校文字，ATT 负责执行与状态管理，人工通过实际游玩确认最终效果。
+做游戏汉化最麻烦的往往不是调翻译接口，而是前后的杂活：不同引擎的解包封包、从脚本和二进制里抠文本、修控制符、换中文字体、调换行爆框。如果直接让 Agent 在对话上下文里翻译几万句台词，既慢又贵还容易漏行；而传统翻译工具又太死板，遇到没见过的引擎或魔改插件就没法用。
+
+这里的做法是把两件事拆开：**让 Agent 主动干前后的活，让 `att.exe` 被动接收文本干中间的苦力活**。
 
 [下载发行版](https://github.com/yexi-by/att/releases/latest) · [使用文档](docs/README.md) · [反馈问题](https://github.com/yexi-by/att/issues)
 
-## 功能
+## 工作原理
 
-- **多种文本来源**：提取 MV/MZ 数据库、事件和指定插件参数；通过 JSONL 接入其他来源。
-- **保留翻译语境**：按语义组织完整文本组；Generic 优先保留完整场景与连续对话，只在相同完整语境的对应位置复用译文。
-- **灵活调用模型**：支持兼容 OpenAI Chat Completions 或 Responses 的服务，以及流式响应、并发和重试。
-- **保护结构与进度**：验收控制符、Placeholder 和正文结构，保存已确认的结果，支持中断后继续处理。
-- **审校与修订**：提供源语残留提示、译文导出、Manual 补译和 Lua 数据库接口。
-- **独立生成译本**：保留原版，在独立目录写回；随包 Skill 和工具协助调查、术语、静态 QA、字体与封包。
+整个汉化流程由 Agent 主导推进，`att.exe` 只作为被调用的本地工具被动工作：
+
+1. **解包与提取（Agent 负责）**
+   Agent 先勘察游戏目录。如果是 RPG Maker MV/MZ，ATT 原生就能读写，Agent 只需要扫描插件和事件、定好提取规则；如果是其他引擎（如 Ren'Py、Kirikiri、Unity、VX Ace、Bakin、WOLF 等），就由 Agent 负责解包、分析脚本或数据格式，写转换脚本把文本抽成统一的 JSONL 喂给 ATT。同时 Agent 会调用随包的 [Formic](tools/formic/README.md) 初筛原文，整理出术语表。
+2. **批量翻译与落盘（ATT 被动接收）**
+   ATT 不去猜游戏结构，只被动接收 Agent 传过来的文本、提取规则和术语表，干好中间最耗时的批量翻译：把上下文拼成任务块、按配置并发请求大模型（支持 OpenAI Chat Completions 和 Responses）、严格检查返回译文里的控制符和占位符有没有被破坏，并把确认的译文存进本地 SQLite 数据库。中途断网或中断也能直接接着跑，翻完后把结果导回给 Agent。
+3. **审校、字体与封包（Agent 负责）**
+   Agent 拿到 ATT 跑完的译文后，先跑静态 QA 检查，排查漏翻、错位或生硬的句子，通过导出 TOML 或执行 Lua 脚本把修好的译文写回 ATT 数据库。最后由 Agent 完成写回、替换中文字体、处理排版换行并重新封包，在独立目录下生成可以直接玩的汉化版，不碰原版游戏文件。
+4. **实机验收（人工确认）**
+   你不需要自己折腾解包工具或导表。等 Agent 跑完后直接打开生成的汉化版试玩，哪里显示不对、漏翻或爆框，把截图和触发位置发回给同一个 Agent 任务，让它定位返修即可。
+
+随包附带了完整的操作流（[`skills/translate-with-att/SKILL.md`](skills/translate-with-att/SKILL.md)）和常见引擎的处理经验，Agent 启动后会自己顺着文档往下做。
 
 ## 快速开始（以 Codex 为例）
 
-### 1. 准备 ATT
+### 1. 解压发行包
 
-从 [Releases](https://github.com/yexi-by/att/releases/latest) 下载 Windows x64 发行包和
-`SHA256SUMS.txt`，核对 SHA-256 后完整解压，例如放在 `D:\Tools\ATT`。
-选择本地固定磁盘上可写、大小写不敏感的 NTFS 目录；具体要求见[目录发布规格](docs/runtime/directory-publishing.md#3-候选目录)。
-保持程序、配置、文档、Prompt、Skill 和工具的目录结构完整。
+从 [Releases](https://github.com/yexi-by/att/releases/latest) 下载 Windows x64 发行包和 `SHA256SUMS.txt`，核对 SHA-256 后完整解压到本地固定磁盘的 NTFS 目录（例如 `D:\Tools\ATT`，具体目录要求见[目录发布规格](docs/runtime/directory-publishing.md#3-候选目录)）。保持里面的程序、配置、文档、Prompt、Skill 和工具目录结构不变。
 
-更新已有安装时，保留 ATT 的 `config.toml`、`tools\formic\config.toml` 和 `projects/`，
-参照新版本的配置模板核对字段。
+升级旧版本时，保留原有的 `config.toml`、`tools\formic\config.toml` 和 `projects/` 目录，对照新版 `config.example.toml` 检查有没有新增字段即可。
 
-### 2. 配置翻译服务
+### 2. 填写模型配置
 
-编辑 `att.exe` 同目录的 `config.toml`，在现有配置中填写模型服务：
+打开 `att.exe` 同目录的 `config.toml`，填入翻译用的大模型服务（ATT 用这里的配置发翻译请求，跟 Codex 自身的账号登录互不影响）：
 
 ```toml
 [llm.clients.example]
@@ -41,29 +44,24 @@ model = "replace-with-model-id"
 stream = false
 ```
 
-需要 Responses 时将 `protocol` 改为 `responses`；`stream` 必填。保留模板中的其他配置，
-按服务限制调整并发、超时和重试，详见[配置说明](docs/runtime/configuration.md)。
-ATT 使用这里的凭据调用翻译模型，Codex 的登录单独完成。
+如果接口走 Responses 协议，把 `protocol` 改成 `"responses"`（`stream` 同样必填）。并发、超时和重试按接口限速调整，详见[配置说明](docs/runtime/configuration.md)。
 
-在 PowerShell 中检查配置和模型连接：
+配好后在 PowerShell 里跑一次连接自检：
 
 ```powershell
 Set-Location 'D:\Tools\ATT'
 .\att.exe test
 ```
 
-术语初筛使用随包 Formic，其模型服务单独配置。按
-[Formic 使用说明](tools/formic/README.md#2-配置模型)编辑 `tools\formic\config.toml`，
-仍在 ATT 目录执行连接自检：
+提取术语表会用到随包的 Formic，它的模型配置在 `tools\formic\config.toml`，按 [Formic 使用说明](tools/formic/README.md#2-配置模型)填好后同样测一下连接：
 
 ```powershell
 .\tools\formic\formic.exe test --config .\tools\formic\config.toml
 ```
 
-### 3. 交给 Codex
+### 3. 把汉化任务交给 Codex
 
-按[官方文档](https://learn.chatgpt.com/docs/codex/cli)安装 Codex CLI，在上述目录运行 `codex`，
-首次启动时完成登录。将下面的任务发给 Codex，替换游戏路径和语言：
+按[官方文档](https://learn.chatgpt.com/docs/codex/cli)装好 Codex CLI，在 `D:\Tools\ATT` 目录下运行 `codex` 并完成登录。把下面这段话发给它（记得替换里面的游戏路径和语言）：
 
 ```text
 使用当前目录的 att.exe，将 D:\Games\Example 中正常游玩可见的非图片日语文本翻译为简体中文。
@@ -75,51 +73,25 @@ Set-Location 'D:\Tools\ATT'
 最后给出译本路径、静态 QA 结果，以及需要我实机检查的场景和待确认项。
 ```
 
-Codex 需要读取游戏目录、写入 ATT 项目与译本目录，并访问你配置的模型服务。
-按任务实际需要授予这些权限即可。
+运行期间 Codex 会申请读取原游戏目录、写入 ATT 项目与汉化版输出目录，以及访问模型接口，按提示放行即可。
 
-### 4. 实机验收
+### 4. 试玩与返修
 
-按 Codex 给出的路径启动译本，对照[人工实机验证清单](docs/guides/acceptance.md#6-人工实机验证)
-确认显示和玩法正常。发现问题时，把场景、截图和触发步骤发回同一任务，继续修订。
+按 Codex 最后给出的路径启动汉化版，对照[人工实机验证清单](docs/guides/acceptance.md#6-人工实机验证)看看界面、字体、换行和剧情触发正不正常。遇到问题不用自己改文件，把出问题的场景、截图和复现步骤直接发回同一个会话，让 Agent 接着修。
 
-## 工作原理
+## 源码与构建
 
-ATT 将游戏格式、翻译状态和模型请求分开处理：
-
-1. **提取**：Agent 调查文本来源并确定规则，ATT 将原文、语境和写回关系整理进项目数据库。
-2. **规划**：先按完整原文建立稳定任务块，再判断已有译文与重复文本；需要请求时保留完整语境。
-3. **翻译**：模型返回候选，ATT 逐项验收结构和 Placeholder，并按自然顺序提交结果。
-   源语残留等质量提示交由 Agent 审校。
-4. **写回**：从当前有效译文构建独立候选，验证后发布。MV/MZ 输出译后游戏；Generic 输出译后 JSONL，
-   由外部转换流程放回原格式。
-
-数据库保存当前项目事实和译文，日志与任务记录用于复查。中断后依据已经确认的状态继续处理，
-具体失败与恢复方式见[诊断与恢复指南](docs/guides/diagnosis-and-recovery.md)。
-图片文字、特殊脚本和非标准插件内容由 Agent 根据实际结构选择相应工具处理。
-
-完整流程从[翻译 Skill](skills/translate-with-att/SKILL.md)进入；术语阶段由随包
-[Formic](tools/formic/README.md)初筛原文候选，职责边界见[游戏术语表制作 Skill](skills/extract-game-terminology/SKILL.md)。
-
-## 源码维护
-
-ATT 与 Formic 在同一个 Rust workspace 中维护，共用根 `Cargo.lock`、工具链和版本号，
-发行时从同一提交构建 `att.exe` 与 `formic.exe`。Formic 的源码、测试和开发导航位于
-[`crates/formic/`](https://github.com/yexi-by/att/tree/main/crates/formic)；随包使用方法仍见
-[`tools/formic/`](tools/formic/README.md)。构建与发布方法见
-[公开发行指南](https://github.com/yexi-by/att/blob/main/maintenance/releasing.md)。
+ATT 和 Formic 在同一个 Rust workspace 下维护，共用 `Cargo.lock`、工具链和版本号，发布时从同一提交构建 `att.exe` 与 `formic.exe`。Formic 的源码位于 [`crates/formic/`](https://github.com/yexi-by/att/tree/main/crates/formic)，随包使用说明在 [`tools/formic/`](tools/formic/README.md)。本地打包与发布流程见[公开发行指南](https://github.com/yexi-by/att/blob/main/maintenance/releasing.md)。
 
 ## 反馈与联系
 
-欢迎通过 [GitHub Issues](https://github.com/yexi-by/att/issues)反馈问题或建议。
-我可能无法及时查看和回复，但仍建议优先提交 Issue，方便保留上下文、跟踪处理，也帮助遇到同类问题的人。
-反馈时请附上 ATT 版本、复现步骤和相关日志，并移除密钥等敏感信息。
+遇到问题或有建议欢迎提 [GitHub Issues](https://github.com/yexi-by/att/issues)。我平时不一定能及时看消息，但还是建议优先提 Issue，方便留存上下文、后续跟进，也能帮到遇到同样问题的人。提 Issue 时请附上 ATT 版本、复现步骤和相关日志（注意删掉 API Key 等敏感信息）。
 
-也可以添加我的个人联系方式，注明 ATT；已有 Issue 时请一并附上链接：
+也可以加我个人联系方式（请备注 ATT，提过 Issue 的话顺手附一下链接）：
 
 - Telegram：[@yexi666](https://t.me/yexi666)
 - QQ：21729598122
 
 ## 许可
 
-ATT 以 [AGPL-3.0-only](LICENSE) 发布。随包第三方工具与依赖的许可见 `licenses/` 和各工具目录。
+ATT 采用 [AGPL-3.0-only](LICENSE) 许可证发布。随包第三方工具与依赖的许可证见 `licenses/` 及对应工具目录。
