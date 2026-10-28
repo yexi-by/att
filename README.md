@@ -27,7 +27,7 @@
 
 ### 1. 解压发行包
 
-从 [Releases](https://github.com/yexi-by/att/releases/latest) 下载 Windows x64 发行包和 `SHA256SUMS.txt`，核对 SHA-256 后完整解压到本地固定磁盘的 NTFS 目录（例如 `D:\Tools\ATT`，具体目录要求见[目录发布规格](docs/runtime/directory-publishing.md#3-候选目录)）。保持里面的程序、配置、文档、Prompt、Skill 和工具目录结构不变。
+从 [Releases](https://github.com/yexi-by/att/releases/latest) 下载 Windows x64 发行包和 `SHA256SUMS.txt`，核对 SHA-256 后完整解压到本地固定磁盘的 NTFS 目录（具体目录要求见[目录发布规格](docs/runtime/directory-publishing.md#3-候选目录)）。保持里面的程序、配置、文档、Prompt、Skill 和工具目录结构不变。
 
 升级旧版本时，保留原有的 `config.toml`、`tools\formic\config.toml` 和 `projects/` 目录，对照新版 `config.example.toml` 检查有没有新增字段即可。
 
@@ -46,10 +46,9 @@ stream = false
 
 如果接口走 Responses 协议，把 `protocol` 改成 `"responses"`（`stream` 同样必填）。并发、超时和重试按接口限速调整，详见[配置说明](docs/runtime/configuration.md)。
 
-配好后在 PowerShell 里跑一次连接自检：
+配好后在解压目录打开 PowerShell，跑一次连接自检：
 
 ```powershell
-Set-Location 'D:\Tools\ATT'
 .\att.exe test
 ```
 
@@ -61,10 +60,10 @@ Set-Location 'D:\Tools\ATT'
 
 ### 3. 把汉化任务交给 Codex
 
-打开 ChatGPT (Codex) 桌面端并完成登录，将工作目录选在 `D:\Tools\ATT`，把下面这段话发给它（记得替换里面的游戏路径和语言）：
+打开 ChatGPT (Codex) 桌面端并完成登录，将工作目录选在刚才解压的 ATT 目录（`att.exe` 所在目录），把下面这段话发给它（替换里面的 `<游戏目录>` 和语言）：
 
 ```text
-使用当前目录的 att.exe，将 D:\Games\Example 中正常游玩可见的非图片日语文本翻译为简体中文。
+使用当前目录的 att.exe，将 <游戏目录> 中正常游玩可见的非图片日语文本翻译为简体中文。
 
 先完整读取 skills/translate-with-att/SKILL.md，并按其中引用读取当前发行版文档。
 以原版游戏为只读基线，在独立目录生成译本。根据真实文本来源选择提取方式，
